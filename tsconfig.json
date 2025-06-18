@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    //Type Checking
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noUnusedLocals": true,
+    "strict": true,
+    // Modules
+    "baseUrl": ".",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "rootDir": ".",
+    "types": ["node"],
+    // Emit
+    "declaration": true,
+    "importHelpers": true,
+    "newLine": "LF",
+    "noEmitOnError": true,
+    // Language and Environment
+    "experimentalDecorators": true,
+    "lib": ["es2022"],
+    "target": "es2015",
+    "useDefineForClassFields": true,
+    // Completeness
+    "skipDefaultLibCheck": true,
+    "skipLibCheck": true,
+    // JavaScript Support
+    "allowJs": false,
+    // Editor Support
+    "disableSizeLimit": true,
+    // Interop Constraints
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": false,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true
+  }
+}

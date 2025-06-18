@@ -1,0 +1,1 @@
+export { ModbusMaster } from './master';

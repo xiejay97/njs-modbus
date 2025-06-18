@@ -1,0 +1,65 @@
+{
+  "name": "njs-modbus",
+  "version": "1.0.0",
+  "description": "A pure JavaScript implemetation of Modbus for NodeJS.",
+  "keywords": [
+    "modbus",
+    "rtu",
+    "ascii",
+    "serial",
+    "tcp",
+    "udp"
+  ],
+  "homepage": "https://github.com/xiejay97/njs-modbus/tree/main/packages/ui#readme",
+  "bugs": {
+    "url": "https://github.com/xiejay97/njs-modbus/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xiejay97/njs-modbus.git"
+  },
+  "license": "MIT",
+  "author": "Xie Jay <xiejay97@gmail.com>",
+  "sideEffects": false,
+  "type": "module",
+  "main": "dist/index.cjs",
+  "module": "dist/index.mjs",
+  "source": "src/index.ts",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "*.d.ts"
+  ],
+  "scripts": {
+    "build": "rollup -c",
+    "util:sort-package-json": "sort-package-json"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.28.0",
+    "@microsoft/api-extractor": "^7.52.8",
+    "@nx/eslint-plugin": "21.1.3",
+    "@rollup/plugin-commonjs": "^28.0.6",
+    "@swc-node/register": "~1.10.10",
+    "@swc/core": "~1.11.31",
+    "@swc/helpers": "~0.5.17",
+    "@types/node": "~24.0.0",
+    "esbuild": "^0.25.5",
+    "eslint": "^9.28.0",
+    "eslint-config-prettier": "^10.1.5",
+    "eslint-plugin-import": "2.31.0",
+    "eslint-plugin-prettier": "^5.4.1",
+    "microbundle": "^0.15.1",
+    "nx": "21.1.3",
+    "prettier": "^3.5.3",
+    "rollup": "^4.43.0",
+    "rollup-plugin-dts": "^6.2.1",
+    "rollup-plugin-typescript2": "^0.36.0",
+    "sort-package-json": "^3.2.1",
+    "tslib": "^2.8.1",
+    "typescript": "~5.8.3",
+    "typescript-eslint": "^8.34.0"
+  },
+  "peerDependencies": {
+    "serialport": ">=12.0.0"
+  }
+}
