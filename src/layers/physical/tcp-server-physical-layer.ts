@@ -48,13 +48,13 @@ export class TcpServerPhysicalLayer extends AbstractPhysicalLayer {
     });
   }
 
-  override open(options: ListenOptions): Promise<void> {
+  override open(options?: ListenOptions): Promise<void> {
     if (this.destroyed) {
       return Promise.reject(new Error('Port is destroyed'));
     }
     return new Promise((resolve, reject) => {
       let called = false;
-      this._server.listen({ ...options, port: options.port ?? 502 }, () => {
+      this._server.listen({ ...options, port: options?.port ?? 502 }, () => {
         called = true;
         this._isOpen = true;
         this._sockets.clear();

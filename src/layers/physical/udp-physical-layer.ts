@@ -53,14 +53,14 @@ export class UdpPhysicalLayer extends AbstractPhysicalLayer {
     this._address = remote?.address;
   }
 
-  override open(options: BindOptions): Promise<void> {
+  override open(options?: BindOptions): Promise<void> {
     if (this.destroyed) {
       return Promise.reject(new Error('Port is destroyed'));
     }
     return new Promise((resolve, reject) => {
       if (this.isServer) {
         let called = false;
-        this._socket.bind({ ...options, port: options.port ?? 502 }, () => {
+        this._socket.bind({ ...options, port: options?.port ?? 502 }, () => {
           called = true;
           this._isOpen = true;
           this._socket.on('close', () => {

@@ -25,13 +25,13 @@ export class TcpClientPhysicalLayer extends AbstractPhysicalLayer {
     this._socket = new Socket(options);
   }
 
-  override open(options: Partial<SocketConnectOpts>): Promise<void> {
+  override open(options?: SocketConnectOpts): Promise<void> {
     if (this.destroyed) {
       return Promise.reject(new Error('Port is destroyed'));
     }
     return new Promise((resolve, reject) => {
       let called = false;
-      this._socket.connect({ ...options, port: 502 }, () => {
+      this._socket.connect(options ?? { port: 502 }, () => {
         called = true;
         this._isOpen = true;
         this._socket.on('data', (data: Buffer) => {
