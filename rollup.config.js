@@ -17,6 +17,7 @@ export default [
         format: 'esm',
       },
     ],
+    external: [/^node:.+$/, 'serialport'],
     plugins: [
       ts({
         tsconfig: 'tsconfig.json',
@@ -31,7 +32,7 @@ export default [
       file: 'dist/index.d.ts',
       format: 'esm',
     },
-    external: [],
+    external: [/^node:.+$/, 'serialport'],
     plugins: [dts({})],
   },
 ];
