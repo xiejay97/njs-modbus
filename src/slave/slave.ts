@@ -60,11 +60,11 @@ export interface ModbusSlaveModel {
 
   readDeviceIdentification?: FConvertPromise<() => { [index: number]: string }>;
 
-  addressRange?: {
-    discreteInputs?: [number, number];
-    coils?: [number, number];
-    inputRegisters?: [number, number];
-    holdingRegisters?: [number, number];
+  getAddressRange?: () => {
+    discreteInputs?: [number, number] | [number, number][];
+    coils?: [number, number] | [number, number][];
+    inputRegisters?: [number, number] | [number, number][];
+    holdingRegisters?: [number, number] | [number, number][];
   };
 }
 
@@ -197,7 +197,7 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
         const address = bufferRx.readUInt16BE(0);
         const length = bufferRx.readUInt16BE(2);
         if (length >= 0x0001 && length <= 0x07d0) {
-          if (checkRange([address, address + length], this.model.addressRange?.coils)) {
+          if (checkRange([address, address + length], this.model.getAddressRange?.().coils)) {
             Promise.resolve(this.model.readCoils(address, length))
               .then((coils) => {
                 const bufferTx = Buffer.alloc(Math.ceil(length / 8));
@@ -230,7 +230,7 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
         const address = bufferRx.readUInt16BE(0);
         const length = bufferRx.readUInt16BE(2);
         if (length >= 0x0001 && length <= 0x07d0) {
-          if (checkRange([address, address + length], this.model.addressRange?.discreteInputs)) {
+          if (checkRange([address, address + length], this.model.getAddressRange?.().discreteInputs)) {
             Promise.resolve(this.model.readDiscreteInputs(address, length))
               .then((discreteInputs) => {
                 const bufferTx = Buffer.alloc(Math.ceil(length / 8));
@@ -263,7 +263,7 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
         const address = bufferRx.readUInt16BE(0);
         const length = bufferRx.readUInt16BE(2);
         if (length >= 0x0001 && length <= 0x007d) {
-          if (checkRange([address, address + length], this.model.addressRange?.holdingRegisters)) {
+          if (checkRange([address, address + length], this.model.getAddressRange?.().holdingRegisters)) {
             Promise.resolve(this.model.readHoldingRegisters(address, length))
               .then((registers) => {
                 const bufferTx = Buffer.alloc(length * 2);
@@ -294,7 +294,7 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
         const address = bufferRx.readUInt16BE(0);
         const length = bufferRx.readUInt16BE(2);
         if (length >= 0x0001 && length <= 0x007d) {
-          if (checkRange([address, address + length], this.model.addressRange?.inputRegisters)) {
+          if (checkRange([address, address + length], this.model.getAddressRange?.().inputRegisters)) {
             Promise.resolve(this.model.readInputRegisters(address, length))
               .then((registers) => {
                 const bufferTx = Buffer.alloc(length * 2);
@@ -325,7 +325,7 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
         const address = bufferRx.readUInt16BE(0);
         const value = bufferRx.readUInt16BE(2);
         if (value === 0x0000 || value === 0xff00) {
-          if (checkRange(address, this.model.addressRange?.coils)) {
+          if (checkRange(address, this.model.getAddressRange?.().coils)) {
             Promise.resolve(this.model.writeSingleCoil(address, value === 0xff00))
               .then(() => {
                 response(this.applicationLayer.encode(frame));
@@ -352,7 +352,7 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
         const address = bufferRx.readUInt16BE(0);
         const value = bufferRx.readUInt16BE(2);
         if (value >= 0x0000 && value <= 0xffff) {
-          if (checkRange(address, this.model.addressRange?.holdingRegisters)) {
+          if (checkRange(address, this.model.getAddressRange?.().holdingRegisters)) {
             Promise.resolve(this.model.writeSingleRegister(address, value))
               .then(() => {
                 response(this.applicationLayer.encode(frame));
@@ -380,7 +380,7 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
         const length = bufferRx.readUInt16BE(2);
         const byteCount = bufferRx[4];
         if (length >= 0x0001 && length <= 0x07b0 && byteCount === Math.ceil(length / 8)) {
-          if (checkRange([address, address + length], this.model.addressRange?.coils)) {
+          if (checkRange([address, address + length], this.model.getAddressRange?.().coils)) {
             const value = Array.from({ length }).map((_, index) => (bufferRx[5 + ~~(index / 8)] & (1 << index % 8)) > 0);
             Promise.resolve(
               this.model.writeMultipleCoils
@@ -413,7 +413,7 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
         const length = bufferRx.readUInt16BE(2);
         const byteCount = bufferRx[4];
         if (length >= 0x0001 && length <= 0x007b && byteCount === length * 2) {
-          if (checkRange([address, address + length], this.model.addressRange?.holdingRegisters)) {
+          if (checkRange([address, address + length], this.model.getAddressRange?.().holdingRegisters)) {
             const value = Array.from({ length }).map((_, index) => bufferRx.readUInt16BE(5 + index * 2));
             Promise.resolve(
               this.model.writeMultipleRegisters
@@ -466,7 +466,7 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
         const address = bufferRx.readUInt16BE(0);
         const andMask = bufferRx.readUInt16BE(2);
         const orMask = bufferRx.readUInt16BE(4);
-        if (checkRange(address, this.model.addressRange?.holdingRegisters)) {
+        if (checkRange(address, this.model.getAddressRange?.().holdingRegisters)) {
           Promise.resolve(
             this.model.maskWriteRegister
               ? this.model.maskWriteRegister(address, andMask, orMask)
@@ -512,7 +512,7 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
           if (
             checkRange(
               [address.read, address.read + length.read, address.write, address.write + length.write],
-              this.model.addressRange?.holdingRegisters,
+              this.model.getAddressRange?.().holdingRegisters,
             )
           ) {
             const value = Array.from({ length: length.write }).map((_, index) => bufferRx.readUInt16BE(9 + index * 2));
