@@ -12,16 +12,16 @@ export class RtuApplicationLayer extends AbstractApplicationLayer {
 
   constructor(
     physicalLayer: SerialPhysicalLayer | TcpServerPhysicalLayer | TcpClientPhysicalLayer | UdpPhysicalLayer,
-    serialFrameInterval?: { baudRate: number; bitsBetweenFrames?: number },
+    bitsBetweenFrames?: number,
   ) {
     super();
 
     let threePointFiveT = 0;
-    if (physicalLayer.TYPE === 'SERIAL' && serialFrameInterval) {
+    if (physicalLayer.TYPE === 'SERIAL') {
       threePointFiveT = Math.ceil(
-        serialFrameInterval.baudRate > 19200
+        (physicalLayer as SerialPhysicalLayer).baudRate > 19200
           ? 1.8
-          : getThreePointFiveT(serialFrameInterval.baudRate, serialFrameInterval.bitsBetweenFrames),
+          : getThreePointFiveT((physicalLayer as SerialPhysicalLayer).baudRate, bitsBetweenFrames),
       );
     }
     const handleData = (data: Buffer, response: (data: Buffer) => Promise<void>) => {

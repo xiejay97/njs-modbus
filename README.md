@@ -69,7 +69,7 @@ npm install njs-modbus
 import { SerialPhysicalLayer, RtuApplicationLayer, ModbusMaster } from 'njs-modbus';
 
 const physicalLayer = new SerialPhysicalLayer({ path: 'COM1', baudRate: 9600, dataBits: 8, parity: 'none', stopBits: 1 });
-const applicationLayer = new RtuApplicationLayer(physicalLayer, { baudRate: 9600 });
+const applicationLayer = new RtuApplicationLayer(physicalLayer);
 
 const modbusMaster = new ModbusMaster(applicationLayer, physicalLayer);
 
@@ -99,7 +99,7 @@ const MB_SERVER = {
 };
 
 const physicalLayer = new SerialPhysicalLayer({ path: 'COM1', baudRate: 9600, dataBits: 8, parity: 'none', stopBits: 1 });
-const applicationLayer = new RtuApplicationLayer(physicalLayer, { baudRate: 9600 });
+const applicationLayer = new RtuApplicationLayer(physicalLayer);
 
 const modbusSlave = new ModbusSlave(
   {

@@ -33,6 +33,7 @@ export class SerialPhysicalLayer extends AbstractPhysicalLayer {
 
   private _serialport: SerialPort;
   private _destroyed = false;
+  private _baudRate: number;
 
   get isOpen(): boolean {
     return this._serialport.isOpen;
@@ -42,10 +43,15 @@ export class SerialPhysicalLayer extends AbstractPhysicalLayer {
     return this._destroyed;
   }
 
+  get baudRate(): number {
+    return this._baudRate;
+  }
+
   constructor(options: SerialPhysicalLayerOptions) {
     super();
 
     this._serialport = new SerialPort({ ...options, autoOpen: false });
+    this._baudRate = options.baudRate;
   }
 
   override open(): Promise<void> {
