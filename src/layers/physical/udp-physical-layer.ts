@@ -92,6 +92,7 @@ export class UdpPhysicalLayer extends AbstractPhysicalLayer {
           if (error) {
             reject(error);
           } else {
+            this.emit('write', data);
             resolve();
           }
         });

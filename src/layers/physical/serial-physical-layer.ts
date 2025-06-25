@@ -80,6 +80,7 @@ export class SerialPhysicalLayer extends AbstractPhysicalLayer {
           if (error) {
             reject(error);
           } else {
+            this.emit('write', data);
             resolve();
           }
         });

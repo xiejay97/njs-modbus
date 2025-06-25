@@ -2,6 +2,7 @@ import EventEmitter from 'node:events';
 
 interface AbstractPhysicalLayerEvents {
   data: [data: Buffer, response: (data: Buffer) => Promise<void>];
+  write: [data: Buffer];
   error: [error: Error];
   close: [];
 }
