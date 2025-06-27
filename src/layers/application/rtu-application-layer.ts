@@ -12,17 +12,29 @@ export class RtuApplicationLayer extends AbstractApplicationLayer {
 
   constructor(
     physicalLayer: SerialPhysicalLayer | TcpServerPhysicalLayer | TcpClientPhysicalLayer | UdpPhysicalLayer,
-    bitsBetweenFrames?: number,
+    /**
+     * The time interval between two frames, support two formats:
+     * - bit: `48bit` as default
+     * - millisecond: `20ms`
+     */
+    intervalBetweenFrames?: `${number}bit` | `${number}ms`,
   ) {
     super();
 
     let threePointFiveT = 0;
     if (physicalLayer.TYPE === 'SERIAL') {
-      threePointFiveT = Math.ceil(
-        (physicalLayer as SerialPhysicalLayer).baudRate > 19200
-          ? 1.8
-          : getThreePointFiveT((physicalLayer as SerialPhysicalLayer).baudRate, bitsBetweenFrames),
-      );
+      if (intervalBetweenFrames && intervalBetweenFrames.endsWith('ms')) {
+        threePointFiveT = Number(intervalBetweenFrames.slice(0, -2));
+      } else {
+        threePointFiveT = Math.ceil(
+          (physicalLayer as SerialPhysicalLayer).baudRate > 19200
+            ? 1.8
+            : getThreePointFiveT(
+                (physicalLayer as SerialPhysicalLayer).baudRate,
+                intervalBetweenFrames ? Number(intervalBetweenFrames.slice(0, -3)) : 48,
+              ),
+        );
+      }
     }
     const handleData = (data: Buffer, response: (data: Buffer) => Promise<void>) => {
       this._bufferRx = Buffer.concat([this._bufferRx, data]);
