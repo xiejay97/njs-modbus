@@ -99,11 +99,11 @@ export class RtuApplicationLayer extends AbstractApplicationLayer {
             return;
           }
           if (typeof res === 'number') {
-            if (res < frame.data.length) {
+            if (frame.data.length < res) {
               callback(new Error('Insufficient data length'));
               return;
             }
-            if (res !== frame.data.length) {
+            if (frame.data.length !== res) {
               callback(new Error('Invalid response'));
               return;
             }
