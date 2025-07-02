@@ -43,29 +43,27 @@ export class RtuApplicationLayer extends AbstractApplicationLayer {
     }
     const handleData = (data: Buffer, response: (data: Buffer) => Promise<void>) => {
       this._bufferRx = Buffer.concat([this._bufferRx, data]);
-      if (this._waitingResponse) {
+      clearTimeout(this._timerThreePointFive);
+      const handleData = () => {
         this.framing(this._bufferRx, (error, frame) => {
-          if (error && error.message === 'Insufficient data length') {
-            return;
-          }
-          this._waitingResponse!.callback(error, frame);
-          this._bufferRx = Buffer.alloc(0);
-        });
-      } else {
-        clearTimeout(this._timerThreePointFive);
-        const handleData = () => {
-          this.framing(this._bufferRx, (error, frame) => {
+          if (this._waitingResponse) {
+            if (error && error.message === 'Insufficient data length') {
+              return;
+            }
+            this._waitingResponse.callback(error, frame);
+            this._bufferRx = Buffer.alloc(0);
+          } else {
             if (!error) {
               this.emit('framing', frame!, response);
             }
             this._bufferRx = Buffer.alloc(0);
-          });
-        };
-        if (threePointFiveT) {
-          this._timerThreePointFive = setTimeout(handleData, threePointFiveT);
-        } else {
-          handleData();
-        }
+          }
+        });
+      };
+      if (threePointFiveT) {
+        this._timerThreePointFive = setTimeout(handleData, threePointFiveT);
+      } else {
+        handleData();
       }
     };
     physicalLayer.on('data', handleData);
