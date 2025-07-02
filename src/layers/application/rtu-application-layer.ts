@@ -6,6 +6,11 @@ import { AbstractApplicationLayer } from './abstract-application-layer';
 import { crc, getThreePointFiveT } from '../../utils';
 
 export class RtuApplicationLayer extends AbstractApplicationLayer {
+  private _waitingResponse?: {
+    preCheck: ((frame: ApplicationDataUnit & { buffer: Buffer }) => boolean | number | undefined)[];
+    callback: (error: Error | null, frame?: ApplicationDataUnit & { buffer: Buffer }) => void;
+  };
+
   private _timerThreePointFive?: NodeJS.Timeout;
   private _bufferRx = Buffer.alloc(0);
   private _removeAllListeners: (() => void)[] = [];
@@ -38,18 +43,29 @@ export class RtuApplicationLayer extends AbstractApplicationLayer {
     }
     const handleData = (data: Buffer, response: (data: Buffer) => Promise<void>) => {
       this._bufferRx = Buffer.concat([this._bufferRx, data]);
-      clearTimeout(this._timerThreePointFive);
-      const handleData = () => {
-        const frame = this.framing(this._bufferRx);
-        if (frame) {
-          this.emit('framing', frame, response);
-        }
-        this._bufferRx = Buffer.alloc(0);
-      };
-      if (threePointFiveT) {
-        this._timerThreePointFive = setTimeout(handleData, threePointFiveT);
+      if (this._waitingResponse) {
+        this.framing(this._bufferRx, (error, frame) => {
+          if (error && error.message === 'Insufficient data length') {
+            return;
+          }
+          this._waitingResponse!.callback(error, frame);
+          this._bufferRx = Buffer.alloc(0);
+        });
       } else {
-        handleData();
+        clearTimeout(this._timerThreePointFive);
+        const handleData = () => {
+          this.framing(this._bufferRx, (error, frame) => {
+            if (!error) {
+              this.emit('framing', frame!, response);
+            }
+            this._bufferRx = Buffer.alloc(0);
+          });
+        };
+        if (threePointFiveT) {
+          this._timerThreePointFive = setTimeout(handleData, threePointFiveT);
+        } else {
+          handleData();
+        }
       }
     };
     physicalLayer.on('data', handleData);
@@ -67,18 +83,59 @@ export class RtuApplicationLayer extends AbstractApplicationLayer {
     });
   }
 
-  private framing(buffer: Buffer): (ApplicationDataUnit & { buffer: Buffer }) | undefined {
+  private framing(buffer: Buffer, callback: (error: Error | null, frame?: ApplicationDataUnit & { buffer: Buffer }) => void) {
     if (buffer.length >= 4) {
+      const frame = {
+        unit: buffer[0],
+        fc: buffer[1],
+        data: Array.from(buffer.subarray(2, buffer.length - 2)),
+        buffer,
+      };
+      if (this._waitingResponse) {
+        for (const check of this._waitingResponse.preCheck) {
+          const res = check(frame);
+          if (typeof res === 'undefined') {
+            callback(new Error('Insufficient data length'));
+            return;
+          }
+          if (typeof res === 'number') {
+            if (res < frame.data.length) {
+              callback(new Error('Insufficient data length'));
+              return;
+            }
+            if (res !== frame.data.length) {
+              callback(new Error('Invalid response'));
+              return;
+            }
+          }
+          if (!res) {
+            callback(new Error('Invalid response'));
+            return;
+          }
+        }
+      }
       const crcPassed = buffer.readUInt16LE(buffer.length - 2) === crc(buffer.subarray(0, buffer.length - 2));
       if (crcPassed) {
-        return {
-          unit: buffer[0],
-          fc: buffer[1],
-          data: Array.from(buffer.subarray(2, buffer.length - 2)),
-          buffer,
-        };
+        callback(null, frame);
+      } else {
+        callback(new Error('CRC check failed'));
       }
+    } else {
+      callback(new Error('Insufficient data length'));
     }
+  }
+
+  override startWaitingResponse(
+    preCheck: ((frame: ApplicationDataUnit & { buffer: Buffer }) => boolean | number | undefined)[],
+    callback: (error: Error | null, frame?: ApplicationDataUnit & { buffer: Buffer }) => void,
+  ): void {
+    this._waitingResponse = { preCheck, callback };
+    clearTimeout(this._timerThreePointFive);
+    this._bufferRx = Buffer.alloc(0);
+  }
+
+  override stopWaitingResponse(): void {
+    this._waitingResponse = undefined;
   }
 
   override encode(data: ApplicationDataUnit): Buffer {

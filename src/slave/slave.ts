@@ -100,7 +100,14 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
         return;
       }
 
-      const response = frame.unit === 0x00 ? () => Promise.resolve() : _response;
+      const response = async (data: Buffer) => {
+        if (frame.unit === 0x00) {
+          return;
+        }
+        try {
+          await _response(data);
+        } catch (error) {}
+      };
 
       if (model.interceptor) {
         try {

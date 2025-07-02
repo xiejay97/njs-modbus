@@ -4,6 +4,11 @@ import type { TcpClientPhysicalLayer, TcpServerPhysicalLayer, UdpPhysicalLayer }
 import { AbstractApplicationLayer } from './abstract-application-layer';
 
 export class TcpApplicationLayer extends AbstractApplicationLayer {
+  private _waitingResponse?: {
+    preCheck: ((frame: ApplicationDataUnit & { buffer: Buffer }) => boolean | number | undefined)[];
+    callback: (error: Error | null, frame?: ApplicationDataUnit & { buffer: Buffer }) => void;
+  };
+
   private _transactionId = 1;
   private _removeAllListeners: (() => void)[] = [];
 
@@ -11,10 +16,13 @@ export class TcpApplicationLayer extends AbstractApplicationLayer {
     super();
 
     const handleData = (data: Buffer, response: (data: Buffer) => Promise<void>) => {
-      const frame = this.framing(data);
-      if (frame) {
-        this.emit('framing', frame, response);
-      }
+      this.framing(data, (error, frame) => {
+        if (this._waitingResponse) {
+          this._waitingResponse.callback(error, frame);
+        } else if (!error) {
+          this.emit('framing', frame!, response);
+        }
+      });
     };
     physicalLayer.on('data', handleData);
     this._removeAllListeners.push(() => {
@@ -22,18 +30,57 @@ export class TcpApplicationLayer extends AbstractApplicationLayer {
     });
   }
 
-  private framing(buffer: Buffer): (ApplicationDataUnit & { buffer: Buffer }) | undefined {
+  private framing(buffer: Buffer, callback: (error: Error | null, frame?: ApplicationDataUnit & { buffer: Buffer }) => void) {
     if (buffer.length >= 8) {
       if (buffer[2] === 0 && buffer[3] === 0 && buffer.readUInt16BE(4) === buffer.length - 6) {
-        return {
+        const frame = {
           transaction: buffer.readUInt16BE(0),
           unit: buffer[6],
           fc: buffer[7],
           data: Array.from(buffer.subarray(8)),
           buffer,
         };
+        if (this._waitingResponse) {
+          for (const check of this._waitingResponse.preCheck) {
+            const res = check(frame);
+            if (typeof res === 'undefined') {
+              callback(new Error('Insufficient data length'));
+              return;
+            }
+            if (typeof res === 'number') {
+              if (res < frame.data.length) {
+                callback(new Error('Insufficient data length'));
+                return;
+              }
+              if (res !== frame.data.length) {
+                callback(new Error('Invalid response'));
+                return;
+              }
+            }
+            if (!res) {
+              callback(new Error('Invalid response'));
+              return;
+            }
+          }
+        }
+        callback(null, frame);
+      } else {
+        callback(new Error('Invalid data'));
       }
+    } else {
+      callback(new Error('Insufficient data length'));
     }
+  }
+
+  override startWaitingResponse(
+    preCheck: ((frame: ApplicationDataUnit & { buffer: Buffer }) => boolean | number | undefined)[],
+    callback: (error: Error | null, frame?: ApplicationDataUnit & { buffer: Buffer }) => void,
+  ): void {
+    this._waitingResponse = { preCheck, callback };
+  }
+
+  override stopWaitingResponse(): void {
+    this._waitingResponse = undefined;
   }
 
   override encode(data: ApplicationDataUnit): Buffer {

@@ -12,6 +12,11 @@ const CHAR_CODE = {
 };
 
 export class AsciiApplicationLayer extends AbstractApplicationLayer {
+  private _waitingResponse?: {
+    preCheck: ((frame: ApplicationDataUnit & { buffer: Buffer }) => boolean | number | undefined)[];
+    callback: (error: Error | null, frame?: ApplicationDataUnit & { buffer: Buffer }) => void;
+  };
+
   private _status: 'idle' | 'reception' | 'waiting end' = 'idle';
   private _frame: number[] = [];
   private _removeAllListeners: (() => void)[] = [];
@@ -48,10 +53,13 @@ export class AsciiApplicationLayer extends AbstractApplicationLayer {
             } else {
               this._status = 'idle';
               if (value === CHAR_CODE.LF) {
-                const frame = this.framing(Buffer.from(this._frame));
-                if (frame) {
-                  this.emit('framing', frame, response);
-                }
+                this.framing(Buffer.from(this._frame), (error, frame) => {
+                  if (this._waitingResponse) {
+                    this._waitingResponse.callback(error, frame);
+                  } else if (!error) {
+                    this.emit('framing', frame!, response);
+                  }
+                });
               }
             }
             break;
@@ -68,7 +76,7 @@ export class AsciiApplicationLayer extends AbstractApplicationLayer {
     });
 
     const handleClose = () => {
-      this._status = 'reception';
+      this._status = 'idle';
       this._frame = [];
     };
     physicalLayer.on('close', handleClose);
@@ -77,28 +85,73 @@ export class AsciiApplicationLayer extends AbstractApplicationLayer {
     });
   }
 
-  private framing(_buffer: Buffer): (ApplicationDataUnit & { buffer: Buffer }) | undefined {
-    if (_buffer.length >= 6 && _buffer.length % 2 === 0) {
-      const frame: number[] = [];
-      let num = '';
-      for (const value of _buffer) {
-        num += String.fromCharCode(value);
-        if (num.length === 2) {
-          frame.push(Number('0x' + num));
-          num = '';
+  private framing(_buffer: Buffer, callback: (error: Error | null, frame?: ApplicationDataUnit & { buffer: Buffer }) => void) {
+    if (_buffer.length >= 6) {
+      if (_buffer.length % 2 === 0) {
+        const ascii: number[] = [];
+        let num = '';
+        for (const value of _buffer) {
+          num += String.fromCharCode(value);
+          if (num.length === 2) {
+            ascii.push(Number('0x' + num));
+            num = '';
+          }
         }
-      }
-      const buffer = Buffer.from(frame);
-      const lrcPassed = buffer[buffer.length - 1] === lrc(buffer.subarray(0, buffer.length - 1));
-      if (lrcPassed) {
-        return {
+        const buffer = Buffer.from(ascii);
+        const frame = {
           unit: buffer[0],
           fc: buffer[1],
           data: Array.from(buffer.subarray(2, buffer.length - 1)),
           buffer: _buffer,
         };
+        if (this._waitingResponse) {
+          for (const check of this._waitingResponse.preCheck) {
+            const res = check(frame);
+            if (typeof res === 'undefined') {
+              callback(new Error('Insufficient data length'));
+              return;
+            }
+            if (typeof res === 'number') {
+              if (res < frame.data.length) {
+                callback(new Error('Insufficient data length'));
+                return;
+              }
+              if (res !== frame.data.length) {
+                callback(new Error('Invalid response'));
+                return;
+              }
+            }
+            if (!res) {
+              callback(new Error('Invalid response'));
+              return;
+            }
+          }
+        }
+        const lrcPassed = buffer[buffer.length - 1] === lrc(buffer.subarray(0, buffer.length - 1));
+        if (lrcPassed) {
+          callback(null, frame);
+        } else {
+          callback(new Error('LRC check failed'));
+        }
+      } else {
+        callback(new Error('Invalid data'));
       }
+    } else {
+      callback(new Error('Insufficient data length'));
     }
+  }
+
+  override startWaitingResponse(
+    preCheck: ((frame: ApplicationDataUnit & { buffer: Buffer }) => boolean | number | undefined)[],
+    callback: (error: Error | null, frame?: ApplicationDataUnit & { buffer: Buffer }) => void,
+  ): void {
+    this._waitingResponse = { preCheck, callback };
+    this._status = 'idle';
+    this._frame = [];
+  }
+
+  override stopWaitingResponse(): void {
+    this._waitingResponse = undefined;
   }
 
   override encode(data: ApplicationDataUnit): Buffer {
