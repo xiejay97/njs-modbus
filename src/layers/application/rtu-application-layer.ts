@@ -5,6 +5,8 @@ import type { SerialPhysicalLayer } from '../physical';
 import { AbstractApplicationLayer } from './abstract-application-layer';
 import { crc, getThreePointFiveT } from '../../utils';
 
+const MAX_FRAME_LENGTH = 256;
+
 export class RtuApplicationLayer extends AbstractApplicationLayer {
   private _waitingResponse?: {
     preCheck: ((frame: ApplicationDataUnit & { buffer: Buffer }) => boolean | number | undefined)[];
@@ -60,10 +62,14 @@ export class RtuApplicationLayer extends AbstractApplicationLayer {
           }
         });
       };
-      if (threePointFiveT) {
-        this._timerThreePointFive = setTimeout(handleData, threePointFiveT);
-      } else {
+      if (this._bufferRx.length >= MAX_FRAME_LENGTH) {
         handleData();
+      } else {
+        if (threePointFiveT) {
+          this._timerThreePointFive = setTimeout(handleData, threePointFiveT);
+        } else {
+          handleData();
+        }
       }
     };
     physicalLayer.on('data', handleData);
