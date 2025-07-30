@@ -74,7 +74,7 @@ interface ModbusSlaveEvents {
 }
 
 export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractPhysicalLayer> extends EventEmitter<ModbusSlaveEvents> {
-  public unit = 1;
+  public models = new Map<number, ModbusSlaveModel>();
 
   get isOpen(): boolean {
     return this.physicalLayer.isOpen;
@@ -85,18 +85,13 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
   }
 
   constructor(
-    private model: ModbusSlaveModel,
     private applicationLayer: A,
     private physicalLayer: P,
   ) {
     super();
 
-    if (typeof model.unit !== 'undefined') {
-      this.unit = model.unit;
-    }
-
-    applicationLayer.on('framing', async (frame, _response) => {
-      if (!(frame.unit === 0x00 || frame.unit === this.unit)) {
+    applicationLayer.on('framing', (frame, _response) => {
+      if (!(frame.unit === 0x00 || this.models.has(frame.unit))) {
         return;
       }
 
@@ -109,84 +104,96 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
         } catch (error) {}
       };
 
-      if (model.interceptor) {
-        try {
-          const data = await model.interceptor(frame.fc, frame.data);
-          if (data) {
-            response(this.applicationLayer.encode({ ...frame, data }));
-            return;
+      const intercept = async (model: ModbusSlaveModel) => {
+        if (model.interceptor) {
+          try {
+            const data = await model.interceptor(frame.fc, frame.data);
+            if (data) {
+              response(this.applicationLayer.encode({ ...frame, data }));
+              return 'break';
+            }
+          } catch (error) {
+            this.responseError(frame, response, error as Error);
+            return 'break';
           }
-        } catch (error) {
-          this.responseError(frame, response, error as Error);
-          return;
         }
-      }
+      };
 
-      switch (frame.fc) {
-        case 0x01: {
-          this.handleFC1(frame, response);
-          break;
-        }
+      const handleFC = (model: ModbusSlaveModel) => {
+        switch (frame.fc) {
+          case 0x01: {
+            this.handleFC1(model, frame, response);
+            break;
+          }
 
-        case 0x02: {
-          this.handleFC2(frame, response);
-          break;
-        }
+          case 0x02: {
+            this.handleFC2(model, frame, response);
+            break;
+          }
 
-        case 0x03: {
-          this.handleFC3(frame, response);
-          break;
-        }
+          case 0x03: {
+            this.handleFC3(model, frame, response);
+            break;
+          }
 
-        case 0x04: {
-          this.handleFC4(frame, response);
-          break;
-        }
+          case 0x04: {
+            this.handleFC4(model, frame, response);
+            break;
+          }
 
-        case 0x05: {
-          this.handleFC5(frame, response);
-          break;
-        }
+          case 0x05: {
+            this.handleFC5(model, frame, response);
+            break;
+          }
 
-        case 0x06: {
-          this.handleFC6(frame, response);
-          break;
-        }
+          case 0x06: {
+            this.handleFC6(model, frame, response);
+            break;
+          }
 
-        case 0x0f: {
-          this.handleFC15(frame, response);
-          break;
-        }
+          case 0x0f: {
+            this.handleFC15(model, frame, response);
+            break;
+          }
 
-        case 0x10: {
-          this.handleFC16(frame, response);
-          break;
-        }
+          case 0x10: {
+            this.handleFC16(model, frame, response);
+            break;
+          }
 
-        case 0x11: {
-          this.handleFC17(frame, response);
-          break;
-        }
+          case 0x11: {
+            this.handleFC17(model, frame, response);
+            break;
+          }
 
-        case 0x16: {
-          this.handleFC22(frame, response);
-          break;
-        }
+          case 0x16: {
+            this.handleFC22(model, frame, response);
+            break;
+          }
 
-        case 0x17: {
-          this.handleFC23(frame, response);
-          break;
-        }
+          case 0x17: {
+            this.handleFC23(model, frame, response);
+            break;
+          }
 
-        case 0x2b: {
-          this.handleFC43_14(frame, response);
-          break;
-        }
+          case 0x2b: {
+            this.handleFC43_14(model, frame, response);
+            break;
+          }
 
-        default: {
-          this.responseError(frame, response, getErrorByCode(ErrorCode.ILLEGAL_FUNCTION));
-          break;
+          default: {
+            this.responseError(frame, response, getErrorByCode(ErrorCode.ILLEGAL_FUNCTION));
+            break;
+          }
         }
+      };
+
+      for (const model of frame.unit === 0x00 ? this.models.values() : [this.models.get(frame.unit)!]) {
+        intercept(model).then((res) => {
+          if (res !== 'break') {
+            handleFC(model);
+          }
+        });
       }
     });
     physicalLayer.on('error', (error) => {
@@ -197,15 +204,15 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
     });
   }
 
-  private handleFC1(frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
+  private handleFC1(model: ModbusSlaveModel, frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
     if (frame.data.length === 4) {
-      if (this.model.readCoils) {
+      if (model.readCoils) {
         const bufferRx = Buffer.from(frame.data);
         const address = bufferRx.readUInt16BE(0);
         const length = bufferRx.readUInt16BE(2);
         if (length >= 0x0001 && length <= 0x07d0) {
-          if (checkRange([address, address + length], this.model.getAddressRange?.().coils)) {
-            Promise.resolve(this.model.readCoils(address, length))
+          if (checkRange([address, address + length], model.getAddressRange?.().coils)) {
+            Promise.resolve(model.readCoils(address, length))
               .then((coils) => {
                 const bufferTx = Buffer.alloc(Math.ceil(length / 8));
                 coils.forEach((coil, index) => {
@@ -230,15 +237,15 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
     }
   }
 
-  private handleFC2(frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
+  private handleFC2(model: ModbusSlaveModel, frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
     if (frame.data.length === 4) {
-      if (this.model.readDiscreteInputs) {
+      if (model.readDiscreteInputs) {
         const bufferRx = Buffer.from(frame.data);
         const address = bufferRx.readUInt16BE(0);
         const length = bufferRx.readUInt16BE(2);
         if (length >= 0x0001 && length <= 0x07d0) {
-          if (checkRange([address, address + length], this.model.getAddressRange?.().discreteInputs)) {
-            Promise.resolve(this.model.readDiscreteInputs(address, length))
+          if (checkRange([address, address + length], model.getAddressRange?.().discreteInputs)) {
+            Promise.resolve(model.readDiscreteInputs(address, length))
               .then((discreteInputs) => {
                 const bufferTx = Buffer.alloc(Math.ceil(length / 8));
                 discreteInputs.forEach((discreteInput, index) => {
@@ -263,15 +270,15 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
     }
   }
 
-  private handleFC3(frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
+  private handleFC3(model: ModbusSlaveModel, frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
     if (frame.data.length === 4) {
-      if (this.model.readHoldingRegisters) {
+      if (model.readHoldingRegisters) {
         const bufferRx = Buffer.from(frame.data);
         const address = bufferRx.readUInt16BE(0);
         const length = bufferRx.readUInt16BE(2);
         if (length >= 0x0001 && length <= 0x007d) {
-          if (checkRange([address, address + length], this.model.getAddressRange?.().holdingRegisters)) {
-            Promise.resolve(this.model.readHoldingRegisters(address, length))
+          if (checkRange([address, address + length], model.getAddressRange?.().holdingRegisters)) {
+            Promise.resolve(model.readHoldingRegisters(address, length))
               .then((registers) => {
                 const bufferTx = Buffer.alloc(length * 2);
                 registers.forEach((register, index) => {
@@ -294,15 +301,15 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
     }
   }
 
-  private handleFC4(frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
+  private handleFC4(model: ModbusSlaveModel, frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
     if (frame.data.length === 4) {
-      if (this.model.readInputRegisters) {
+      if (model.readInputRegisters) {
         const bufferRx = Buffer.from(frame.data);
         const address = bufferRx.readUInt16BE(0);
         const length = bufferRx.readUInt16BE(2);
         if (length >= 0x0001 && length <= 0x007d) {
-          if (checkRange([address, address + length], this.model.getAddressRange?.().inputRegisters)) {
-            Promise.resolve(this.model.readInputRegisters(address, length))
+          if (checkRange([address, address + length], model.getAddressRange?.().inputRegisters)) {
+            Promise.resolve(model.readInputRegisters(address, length))
               .then((registers) => {
                 const bufferTx = Buffer.alloc(length * 2);
                 registers.forEach((register, index) => {
@@ -325,15 +332,15 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
     }
   }
 
-  private handleFC5(frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
+  private handleFC5(model: ModbusSlaveModel, frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
     if (frame.data.length === 4) {
-      if (this.model.writeSingleCoil) {
+      if (model.writeSingleCoil) {
         const bufferRx = Buffer.from(frame.data);
         const address = bufferRx.readUInt16BE(0);
         const value = bufferRx.readUInt16BE(2);
         if (value === 0x0000 || value === 0xff00) {
-          if (checkRange(address, this.model.getAddressRange?.().coils)) {
-            Promise.resolve(this.model.writeSingleCoil(address, value === 0xff00))
+          if (checkRange(address, model.getAddressRange?.().coils)) {
+            Promise.resolve(model.writeSingleCoil(address, value === 0xff00))
               .then(() => {
                 response(this.applicationLayer.encode(frame));
               })
@@ -352,15 +359,15 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
     }
   }
 
-  private handleFC6(frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
+  private handleFC6(model: ModbusSlaveModel, frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
     if (frame.data.length === 4) {
-      if (this.model.writeSingleRegister) {
+      if (model.writeSingleRegister) {
         const bufferRx = Buffer.from(frame.data);
         const address = bufferRx.readUInt16BE(0);
         const value = bufferRx.readUInt16BE(2);
         if (value >= 0x0000 && value <= 0xffff) {
-          if (checkRange(address, this.model.getAddressRange?.().holdingRegisters)) {
-            Promise.resolve(this.model.writeSingleRegister(address, value))
+          if (checkRange(address, model.getAddressRange?.().holdingRegisters)) {
+            Promise.resolve(model.writeSingleRegister(address, value))
               .then(() => {
                 response(this.applicationLayer.encode(frame));
               })
@@ -379,20 +386,20 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
     }
   }
 
-  private handleFC15(frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
+  private handleFC15(model: ModbusSlaveModel, frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
     if (frame.data.length > 5 && frame.data.length === 5 + frame.data[4]) {
-      if (this.model.writeMultipleCoils || this.model.writeSingleCoil) {
+      if (model.writeMultipleCoils || model.writeSingleCoil) {
         const bufferRx = Buffer.from(frame.data);
         const address = bufferRx.readUInt16BE(0);
         const length = bufferRx.readUInt16BE(2);
         const byteCount = bufferRx[4];
         if (length >= 0x0001 && length <= 0x07b0 && byteCount === Math.ceil(length / 8)) {
-          if (checkRange([address, address + length], this.model.getAddressRange?.().coils)) {
+          if (checkRange([address, address + length], model.getAddressRange?.().coils)) {
             const value = Array.from({ length }).map((_, index) => (bufferRx[5 + ~~(index / 8)] & (1 << index % 8)) > 0);
             Promise.resolve(
-              this.model.writeMultipleCoils
-                ? this.model.writeMultipleCoils(address, value)
-                : Promise.all(value.map((v, i) => this.model.writeSingleCoil!(address + i, v))),
+              model.writeMultipleCoils
+                ? model.writeMultipleCoils(address, value)
+                : Promise.all(value.map((v, i) => model.writeSingleCoil!(address + i, v))),
             )
               .then(() => {
                 response(this.applicationLayer.encode({ ...frame, data: Array.from(bufferRx).slice(0, 4) }));
@@ -412,20 +419,20 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
     }
   }
 
-  private handleFC16(frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
+  private handleFC16(model: ModbusSlaveModel, frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
     if (frame.data.length > 5 && frame.data.length === 5 + frame.data[4]) {
-      if (this.model.writeMultipleRegisters || this.model.writeSingleRegister) {
+      if (model.writeMultipleRegisters || model.writeSingleRegister) {
         const bufferRx = Buffer.from(frame.data);
         const address = bufferRx.readUInt16BE(0);
         const length = bufferRx.readUInt16BE(2);
         const byteCount = bufferRx[4];
         if (length >= 0x0001 && length <= 0x007b && byteCount === length * 2) {
-          if (checkRange([address, address + length], this.model.getAddressRange?.().holdingRegisters)) {
+          if (checkRange([address, address + length], model.getAddressRange?.().holdingRegisters)) {
             const value = Array.from({ length }).map((_, index) => bufferRx.readUInt16BE(5 + index * 2));
             Promise.resolve(
-              this.model.writeMultipleRegisters
-                ? this.model.writeMultipleRegisters(address, value)
-                : Promise.all(value.map((v, i) => this.model.writeSingleRegister!(address + i, v))),
+              model.writeMultipleRegisters
+                ? model.writeMultipleRegisters(address, value)
+                : Promise.all(value.map((v, i) => model.writeSingleRegister!(address + i, v))),
             )
               .then(() => {
                 response(this.applicationLayer.encode({ ...frame, data: Array.from(bufferRx).slice(0, 4) }));
@@ -445,11 +452,11 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
     }
   }
 
-  private handleFC17(frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
+  private handleFC17(model: ModbusSlaveModel, frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
     if (frame.data.length === 0) {
-      if (this.model.reportServerId) {
-        Promise.resolve(this.model.reportServerId())
-          .then(({ serverId = this.unit, runIndicatorStatus = true, additionalData = [] }) => {
+      if (model.reportServerId) {
+        Promise.resolve(model.reportServerId())
+          .then(({ serverId = model.unit ?? 1, runIndicatorStatus = true, additionalData = [] }) => {
             response(
               this.applicationLayer.encode({
                 ...frame,
@@ -466,19 +473,19 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
     }
   }
 
-  private handleFC22(frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
+  private handleFC22(model: ModbusSlaveModel, frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
     if (frame.data.length === 6) {
-      if (this.model.maskWriteRegister || (this.model.readHoldingRegisters && this.model.writeSingleRegister)) {
+      if (model.maskWriteRegister || (model.readHoldingRegisters && model.writeSingleRegister)) {
         const bufferRx = Buffer.from(frame.data);
         const address = bufferRx.readUInt16BE(0);
         const andMask = bufferRx.readUInt16BE(2);
         const orMask = bufferRx.readUInt16BE(4);
-        if (checkRange(address, this.model.getAddressRange?.().holdingRegisters)) {
+        if (checkRange(address, model.getAddressRange?.().holdingRegisters)) {
           Promise.resolve(
-            this.model.maskWriteRegister
-              ? this.model.maskWriteRegister(address, andMask, orMask)
-              : Promise.resolve(this.model.readHoldingRegisters!(address, 1)).then(([value]) => {
-                  return Promise.resolve(this.model.writeSingleRegister!(address, (value & andMask) | (orMask & (~andMask & 0xff))));
+            model.maskWriteRegister
+              ? model.maskWriteRegister(address, andMask, orMask)
+              : Promise.resolve(model.readHoldingRegisters!(address, 1)).then(([value]) => {
+                  return Promise.resolve(model.writeSingleRegister!(address, (value & andMask) | (orMask & (~andMask & 0xff))));
                 }),
           )
             .then(() => {
@@ -496,9 +503,9 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
     }
   }
 
-  private handleFC23(frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
+  private handleFC23(model: ModbusSlaveModel, frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
     if (frame.data.length > 9 && frame.data.length === 9 + frame.data[8]) {
-      if (this.model.readHoldingRegisters && (this.model.writeMultipleRegisters || this.model.writeSingleRegister)) {
+      if (model.readHoldingRegisters && (model.writeMultipleRegisters || model.writeSingleRegister)) {
         const bufferRx = Buffer.from(frame.data);
         const address = {
           read: bufferRx.readUInt16BE(0),
@@ -519,16 +526,16 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
           if (
             checkRange(
               [address.read, address.read + length.read, address.write, address.write + length.write],
-              this.model.getAddressRange?.().holdingRegisters,
+              model.getAddressRange?.().holdingRegisters,
             )
           ) {
             const value = Array.from({ length: length.write }).map((_, index) => bufferRx.readUInt16BE(9 + index * 2));
             Promise.resolve(
-              this.model.writeMultipleRegisters
-                ? this.model.writeMultipleRegisters(address.write, value)
-                : Promise.all(value.map((v, i) => this.model.writeSingleRegister!(address.write + i, v))),
+              model.writeMultipleRegisters
+                ? model.writeMultipleRegisters(address.write, value)
+                : Promise.all(value.map((v, i) => model.writeSingleRegister!(address.write + i, v))),
             )
-              .then(() => Promise.resolve(this.model.readHoldingRegisters!(address.read, length.read)))
+              .then(() => Promise.resolve(model.readHoldingRegisters!(address.read, length.read)))
               .then((registers) => {
                 const bufferTx = Buffer.alloc(length.read * 2);
                 registers.forEach((register, index) => {
@@ -551,9 +558,9 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
     }
   }
 
-  private handleFC43_14(frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
+  private handleFC43_14(model: ModbusSlaveModel, frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>) {
     if (frame.data.length === 3) {
-      if (frame.data[0] === 0x0e && this.model.readDeviceIdentification) {
+      if (frame.data[0] === 0x0e && model.readDeviceIdentification) {
         const readDeviceIDCode = frame.data[1];
         let objectID = frame.data[2];
 
@@ -593,7 +600,7 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
           }
         }
 
-        Promise.resolve(this.model.readDeviceIdentification())
+        Promise.resolve(model.readDeviceIdentification())
           .then((identification) => {
             const objects = new Map([
               [0x00, 'null'],
@@ -687,6 +694,14 @@ export class ModbusSlave<A extends AbstractApplicationLayer, P extends AbstractP
 
   private responseError(frame: ApplicationDataUnit, response: (data: Buffer) => Promise<void>, error: Error) {
     response(this.applicationLayer.encode({ ...frame, fc: frame.fc | 0x80, data: [getCodeByError(error)] }));
+  }
+
+  public add(model: ModbusSlaveModel) {
+    this.models.set(model.unit ?? 1, model);
+  }
+
+  public remove(unit: number) {
+    this.models.delete(unit);
   }
 
   public open(...args: Parameters<P['open']>): Promise<void> {

@@ -66,6 +66,7 @@ npm install njs-modbus
 ### Modbus RTU Master
 
 ```typescript
+import type { ModbusSlaveModel } from 'njs-modbus';
 import { SerialPhysicalLayer, RtuApplicationLayer, ModbusMaster } from 'njs-modbus';
 
 const physicalLayer = new SerialPhysicalLayer({ path: 'COM1', baudRate: 9600, dataBits: 8, parity: 'none', stopBits: 1 });
@@ -100,72 +101,70 @@ const MB_SERVER = {
 
 const physicalLayer = new SerialPhysicalLayer({ path: 'COM1', baudRate: 9600, dataBits: 8, parity: 'none', stopBits: 1 });
 const applicationLayer = new RtuApplicationLayer(physicalLayer);
-
-const modbusSlave = new ModbusSlave(
-  {
-    readDiscreteInputs: (address, length) => {
-      return Array.from({ length }).map((_, i) => {
-        const discreteInput = MB_SERVER.discreteInputs.get(address + i);
-        if (typeof discreteInput === 'undefined') {
-          return false;
-        }
-        return discreteInput;
-      });
-    },
-
-    readCoils: (address, length) => {
-      return Array.from({ length }).map((_, i) => {
-        const coil = MB_SERVER.coils.get(address + i);
-        if (typeof coil === 'undefined') {
-          return false;
-        }
-        return coil;
-      });
-    },
-    writeSingleCoil: (address, value) => {
-      MB_SERVER.coils.set(address, value);
-    },
-
-    readInputRegisters: (address, length) => {
-      return Array.from({ length }).map((_, i) => {
-        const inputRegister = MB_SERVER.inputRegisters.get(address + i);
-        if (typeof inputRegister === 'undefined') {
-          return 0;
-        }
-        return inputRegister;
-      });
-    },
-
-    readHoldingRegisters: (address, length) => {
-      return Array.from({ length }).map((_, i) => {
-        const holdingRegister = MB_SERVER.holdingRegisters.get(address + i);
-        if (typeof holdingRegister === 'undefined') {
-          return 0;
-        }
-        return holdingRegister;
-      });
-    },
-    writeSingleRegister: (address, value) => {
-      MB_SERVER.holdingRegisters.set(address, value);
-    },
-
-    reportServerId: () => ({ additionalData: [1, 2, 3] }),
-
-    readDeviceIdentification: () => ({
-      0x00: 'Basic:VendorName',
-      0x01: 'Basic:ProductCode',
-      0x02: 'Basic:MajorMinorRevision',
-      0x03: 'Regular:VendorUrl',
-      0x04: 'Regular:ProductName',
-      0x05: 'Regular:ModelName',
-      0x06: 'Regular:UserApplicationName',
-      0x80: 'Extended:Extended',
-      0xff: 'Extended:Extended',
-    }),
+const slave1: ModbusSlaveModel = {
+  readDiscreteInputs: (address, length) => {
+    return Array.from({ length }).map((_, i) => {
+      const discreteInput = MB_SERVER.discreteInputs.get(address + i);
+      if (typeof discreteInput === 'undefined') {
+        return false;
+      }
+      return discreteInput;
+    });
   },
-  applicationLayer,
-  physicalLayer,
-);
+
+  readCoils: (address, length) => {
+    return Array.from({ length }).map((_, i) => {
+      const coil = MB_SERVER.coils.get(address + i);
+      if (typeof coil === 'undefined') {
+        return false;
+      }
+      return coil;
+    });
+  },
+  writeSingleCoil: (address, value) => {
+    MB_SERVER.coils.set(address, value);
+  },
+
+  readInputRegisters: (address, length) => {
+    return Array.from({ length }).map((_, i) => {
+      const inputRegister = MB_SERVER.inputRegisters.get(address + i);
+      if (typeof inputRegister === 'undefined') {
+        return 0;
+      }
+      return inputRegister;
+    });
+  },
+
+  readHoldingRegisters: (address, length) => {
+    return Array.from({ length }).map((_, i) => {
+      const holdingRegister = MB_SERVER.holdingRegisters.get(address + i);
+      if (typeof holdingRegister === 'undefined') {
+        return 0;
+      }
+      return holdingRegister;
+    });
+  },
+  writeSingleRegister: (address, value) => {
+    MB_SERVER.holdingRegisters.set(address, value);
+  },
+
+  reportServerId: () => ({ additionalData: [1, 2, 3] }),
+
+  readDeviceIdentification: () => ({
+    0x00: 'Basic:VendorName',
+    0x01: 'Basic:ProductCode',
+    0x02: 'Basic:MajorMinorRevision',
+    0x03: 'Regular:VendorUrl',
+    0x04: 'Regular:ProductName',
+    0x05: 'Regular:ModelName',
+    0x06: 'Regular:UserApplicationName',
+    0x80: 'Extended:Extended',
+    0xff: 'Extended:Extended',
+  }),
+};
+
+const modbusSlave = new ModbusSlave(applicationLayer, physicalLayer);
+modbusSlave.add(slave1);
 
 modbusSlave
   .open()
