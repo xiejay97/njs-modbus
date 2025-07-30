@@ -66,7 +66,6 @@ npm install njs-modbus
 ### Modbus RTU Master
 
 ```typescript
-import type { ModbusSlaveModel } from 'njs-modbus';
 import { SerialPhysicalLayer, RtuApplicationLayer, ModbusMaster } from 'njs-modbus';
 
 const physicalLayer = new SerialPhysicalLayer({ path: 'COM1', baudRate: 9600, dataBits: 8, parity: 'none', stopBits: 1 });
@@ -90,21 +89,22 @@ modbusMaster
 ### Modbus RTU Slave
 
 ```typescript
+import type { ModbusSlaveModel } from 'njs-modbus';
 import { SerialPhysicalLayer, RtuApplicationLayer, ModbusSlave } from 'njs-modbus';
 
-const MB_SERVER = {
+const physicalLayer = new SerialPhysicalLayer({ path: 'COM1', baudRate: 9600, dataBits: 8, parity: 'none', stopBits: 1 });
+const applicationLayer = new RtuApplicationLayer(physicalLayer);
+
+const slave1Data = {
   discreteInputs: new Map<number, boolean>(),
   coils: new Map<number, boolean>(),
   inputRegisters: new Map<number, number>(),
   holdingRegisters: new Map<number, number>(),
 };
-
-const physicalLayer = new SerialPhysicalLayer({ path: 'COM1', baudRate: 9600, dataBits: 8, parity: 'none', stopBits: 1 });
-const applicationLayer = new RtuApplicationLayer(physicalLayer);
 const slave1: ModbusSlaveModel = {
   readDiscreteInputs: (address, length) => {
     return Array.from({ length }).map((_, i) => {
-      const discreteInput = MB_SERVER.discreteInputs.get(address + i);
+      const discreteInput = slave1Data.discreteInputs.get(address + i);
       if (typeof discreteInput === 'undefined') {
         return false;
       }
@@ -114,7 +114,7 @@ const slave1: ModbusSlaveModel = {
 
   readCoils: (address, length) => {
     return Array.from({ length }).map((_, i) => {
-      const coil = MB_SERVER.coils.get(address + i);
+      const coil = slave1Data.coils.get(address + i);
       if (typeof coil === 'undefined') {
         return false;
       }
@@ -122,12 +122,12 @@ const slave1: ModbusSlaveModel = {
     });
   },
   writeSingleCoil: (address, value) => {
-    MB_SERVER.coils.set(address, value);
+    slave1Data.coils.set(address, value);
   },
 
   readInputRegisters: (address, length) => {
     return Array.from({ length }).map((_, i) => {
-      const inputRegister = MB_SERVER.inputRegisters.get(address + i);
+      const inputRegister = slave1Data.inputRegisters.get(address + i);
       if (typeof inputRegister === 'undefined') {
         return 0;
       }
@@ -137,7 +137,7 @@ const slave1: ModbusSlaveModel = {
 
   readHoldingRegisters: (address, length) => {
     return Array.from({ length }).map((_, i) => {
-      const holdingRegister = MB_SERVER.holdingRegisters.get(address + i);
+      const holdingRegister = slave1Data.holdingRegisters.get(address + i);
       if (typeof holdingRegister === 'undefined') {
         return 0;
       }
@@ -145,7 +145,7 @@ const slave1: ModbusSlaveModel = {
     });
   },
   writeSingleRegister: (address, value) => {
-    MB_SERVER.holdingRegisters.set(address, value);
+    slave1Data.holdingRegisters.set(address, value);
   },
 
   reportServerId: () => ({ additionalData: [1, 2, 3] }),
