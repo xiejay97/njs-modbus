@@ -1,0 +1,42 @@
+{
+  "compilerOptions": {
+    //Type Checking
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noUnusedLocals": true,
+    "strict": true,
+
+    // Modules
+    "module": "preserve",
+    "moduleDetection": "force",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "types": ["node", "vitest/globals"],
+
+    // Emit
+    "noEmit": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+
+    // Language and Environment
+    "lib": ["es2022"],
+    "target": "es2022",
+
+    // Completeness
+    "skipLibCheck": true,
+
+    // Interop Constraints
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+
+    "paths": {
+      "njs-modbus": ["./src/index.ts"],
+      "#njs-modbus": ["../src/index.ts"],
+      "#src/*": ["./src/*"],
+      "#test/*": ["./test/*"]
+    }
+  },
+  "include": ["src", "test", "benchmark", "examples"]
+}

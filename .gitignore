@@ -1,0 +1,5 @@
+node_modules
+dist
+dist-wiki
+coverage
+benchmark/report_data.md

@@ -1,0 +1,17 @@
+{
+  "name": "njs-modbus-best-practice",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "server": "tsx slave.ts",
+    "client": "tsx master.ts",
+    "demo": "tsx slave.ts & sleep 1 && tsx master.ts"
+  },
+  "dependencies": {
+    "njs-modbus": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.22.4"
+  }
+}

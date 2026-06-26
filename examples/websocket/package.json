@@ -1,0 +1,19 @@
+{
+  "name": "njs-modbus-websocket",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "server": "tsx demo-server.ts",
+    "client": "tsx demo-client.ts",
+    "demo": "tsx demo-server.ts & sleep 1 && tsx demo-client.ts"
+  },
+  "dependencies": {
+    "njs-modbus": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.22.4"
+  }
+}

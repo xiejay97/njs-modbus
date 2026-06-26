@@ -1,0 +1,21 @@
+{
+  "name": "njs-modbus-security",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "server": "tsx tcp-access-control/slave.ts",
+    "client": "tsx tcp-access-control/master.ts",
+    "demo": "tsx tcp-access-control/slave.ts & sleep 1 && tsx tcp-access-control/master.ts",
+    "audit": "tsx slave-audit-logging.ts",
+    "custom-fc": "tsx custom-fc-authorization.ts",
+    "transport": "tsx transport-layer-security.ts",
+    "tls": "tsx tls-transport.ts"
+  },
+  "dependencies": {
+    "njs-modbus": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.22.4"
+  }
+}

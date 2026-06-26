@@ -1,0 +1,2 @@
+- [Benchmark Optimization Guidelines](benchmark-optimization-guidelines.md) — eliminate hot-path allocations, use optimal APIs, follow all-fcs-worker as the reference
+- [src/ Test Framework Conventions](src-test-framework-conventions.md) — test only src/, co-located *.test.ts, shared helpers in src/__test__/, mock physical layer, do not break hot-path inlining

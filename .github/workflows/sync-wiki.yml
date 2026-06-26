@@ -1,0 +1,71 @@
+name: Deploy Wiki
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  deploy-wiki:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 'lts/*'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Docs
+        run: pnpm run docs:build
+
+      - name: Generate Wiki Sidebar
+        run: |
+          cat > dist-wiki/_Sidebar.md << 'EOF'
+          - [Home](Home)
+
+          ## Core API
+          - [ModbusMaster](Class.ModbusMaster)
+          - [ModbusSlave](Class.ModbusSlave)
+
+          ## Physical Layer
+          - [AbstractPhysicalLayer](Class.AbstractPhysicalLayer)
+          - [SerialPhysicalLayer](Class.SerialPhysicalLayer)
+          - [TcpClientPhysicalLayer](Class.TcpClientPhysicalLayer)
+          - [TcpServerPhysicalLayer](Class.TcpServerPhysicalLayer)
+          - [UdpClientPhysicalLayer](Class.UdpClientPhysicalLayer)
+          - [UdpServerPhysicalLayer](Class.UdpServerPhysicalLayer)
+
+          ## Pipeline Layer
+          - [AbstractPipelineLayer](Class.AbstractPipelineLayer)
+          - [SerialPipelineLayer](Class.SerialPipelineLayer)
+          - [TcpPipelineLayer](Class.TcpPipelineLayer)
+          - [UdpClientPipelineLayer](Class.UdpClientPipelineLayer)
+
+          ## Protocol Layer
+          - [AbstractProtocolLayer](Class.AbstractProtocolLayer)
+          - [AsciiProtocolLayer](Class.AsciiProtocolLayer)
+          - [RtuProtocolLayer](Class.RtuProtocolLayer)
+          - [TcpProtocolLayer](Class.TcpProtocolLayer)
+
+          ## Errors
+          - [ModbusError](Class.ModbusError)
+          - [UnauthorizedAccessError](Class.UnauthorizedAccessError)
+          - [ErrorCode](Enumeration.ErrorCode)
+          EOF
+
+      - name: Upload to GitHub Wiki
+        uses: Andrew-Chen-Wang/github-wiki-action@v5
+        with:
+          path: dist-wiki

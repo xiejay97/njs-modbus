@@ -1,0 +1,18 @@
+{
+  "name": "njs-modbus-benchmark",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {},
+  "imports": {
+    "#njs-modbus": {
+      "dist": "./njs-modbus.mjs",
+      "default": "njs-modbus"
+    }
+  },
+  "dependencies": {
+    "jsmodbus": "^4.0.10",
+    "modbus-serial": "^8.0.25",
+    "njs-modbus": "workspace:*"
+  }
+}

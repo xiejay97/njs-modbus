@@ -1,0 +1,111 @@
+{
+  "name": "njs-modbus",
+  "version": "3.4.0",
+  "description": "A zero-dependency Modbus protocol library for Node.js with TCP, RTU, ASCII, UDP, and TLS support.",
+  "keywords": [
+    "modbus",
+    "tcp",
+    "rtu",
+    "ascii",
+    "tls",
+    "udp"
+  ],
+  "author": "Xie Jay <xiejay97@gmail.com>",
+  "license": "BUSL-1.1",
+  "homepage": "https://github.com/xiejay97/njs-modbus#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiejay97/njs-modbus.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xiejay97/njs-modbus/issues"
+  },
+  "sideEffects": false,
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.cts",
+  "exports": {
+    ".": {
+      "dev": "./src/index.ts",
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "exports": {
+      ".": {
+        "import": {
+          "types": "./dist/index.d.mts",
+          "default": "./dist/index.mjs"
+        },
+        "require": {
+          "types": "./dist/index.d.cts",
+          "default": "./dist/index.cjs"
+        }
+      },
+      "./package.json": "./package.json"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "release": "release-it",
+    "docs:build": "typedoc",
+    "benchmark": "NODE_OPTIONS='--conditions=dev' tsx benchmark/bench-run.ts",
+    "benchmark:test": "NODE_OPTIONS='--conditions=dev' tsx benchmark/bench-test-report.ts",
+    "benchmark:fast": "NODE_OPTIONS='--conditions=dev' tsx benchmark/bench-run.ts --all --report --fast --max-payload",
+    "benchmark:full": "pnpm run build && NODE_OPTIONS='--conditions=dist' pnpm exec tsx benchmark/bench-run.ts --all --report --max-payload --runs 5 --duration 120 --chaos-requests 2000",
+    "prepublishOnly": "pnpm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@release-it/conventional-changelog": "^11.0.1",
+    "@types/node": "^18.19.130",
+    "@typescript/native-preview": "7.0.0-dev.20260509.2",
+    "@vitest/coverage-v8": "^4.1.8",
+    "eslint": "^9.39.4",
+    "eslint-config-flat-gitignore": "^2.3.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-prettier": "^5.5.6",
+    "prettier": "^3.8.4",
+    "release-it": "^20.2.0",
+    "tsdown": "^0.22.0",
+    "tsx": "^4.22.4",
+    "typedoc": "^0.28.19",
+    "typedoc-plugin-markdown": "^4.12.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.61.0",
+    "unplugin-unused": "^0.5.7",
+    "vitest": "^4.1.5"
+  },
+  "peerDependencies": {
+    "serialport": ">=12.0.0"
+  },
+  "peerDependenciesMeta": {
+    "serialport": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=18.19"
+  },
+  "packageManager": "pnpm@11.6.0"
+}

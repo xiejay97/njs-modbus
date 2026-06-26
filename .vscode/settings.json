@@ -1,0 +1,51 @@
+{
+  "files.watcherExclude": {
+    "**/node_modules/*/**": true,
+    "**/dist/**": true,
+    "**/build/**": true,
+    "**/.cache/**": true,
+    "**/.temp/**": true,
+    "**/coverage/**": true,
+    "**/.next/**": true,
+    "**/.nuxt/**": true,
+    "**/.nx/**": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/dist/**": true,
+    "**/build/**": true,
+    "**/.cache/**": true,
+    "**/.temp/**": true,
+    "**/coverage/**": true,
+    "**/.next/**": true,
+    "**/.nuxt/**": true,
+    "**/.nx/**": true,
+    "**/.claude/worktrees": true,
+    "**/benchmark": true,
+    "**/package-lock.json": true,
+    "**/yarn.lock": true,
+    "**/pnpm-lock.yaml": true
+  },
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": "explicit"
+  },
+  "editor.bracketPairColorization.enabled": true,
+  "editor.guides.bracketPairs": "active",
+  "files.associations": {
+    "*.json": "jsonc",
+    ".prettierrc": "jsonc"
+  },
+  "git.ignoreLimitWarning": true,
+  "js/ts.tsdk.path": "./node_modules/typescript/lib",
+  "js/ts.tsdk.promptToUseWorkspaceVersion": true,
+  "js/ts.preferences.importModuleSpecifier": "project-relative",
+  "[typescript]": {
+    "editor.defaultFormatter": "dbaeumer.vscode-eslint"
+  },
+  "[typescriptreact]": {
+    "editor.defaultFormatter": "dbaeumer.vscode-eslint"
+  },
+  "eslint.format.enable": true
+}
