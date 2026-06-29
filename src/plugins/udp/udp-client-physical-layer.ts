@@ -186,9 +186,9 @@ export class UdpClientPhysicalLayer extends AbstractPhysicalLayer {
    * @param cb Optional callback invoked once the socket is bound and connected.
    * @returns `void`.
    */
-  override open(remote: { port?: number; address?: string }, cb?: (err?: Error | null) => void): void {
+  override open(remote: { port?: number; address?: string }, cb?: (err: Error | null) => void): void {
     if (this.state === PhysicalLayerState.OPEN) {
-      cb?.();
+      cb?.(null);
       return;
     }
     if (this.state === PhysicalLayerState.OPENING) {
