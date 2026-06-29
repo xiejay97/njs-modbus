@@ -110,7 +110,7 @@ export interface ModbusUnitModel {
    * @param value Coil state — `0` (OFF) or `1` (ON).
    * @param callback Invoked with `[null]` on success or `[errorCode]` on failure.
    */
-  writeSingleCoil?: (address: number, value: number, callback: Callback<void>) => void;
+  writeSingleCoil?: (address: number, value: 0 | 1, callback: Callback<void>) => void;
 
   /**
    * FC 15 — Write Multiple Coils.

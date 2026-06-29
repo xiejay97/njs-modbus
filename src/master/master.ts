@@ -1023,15 +1023,15 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    *
    * @param unit Unit / slave address; `0` = broadcast.
    * @param address Zero-based coil address (0..0xFFFF).
-   * @param value Coil state — pass `0` for OFF (`0x0000` on the wire) and any
-   *   non-zero value for ON (`0xFF00`).
+   * @param value Coil state — `0` for OFF (`0x0000` on the wire) or `1` for
+   *   ON (`0xFF00`).
    * @param timeout Per-request timeout override (ms).
    * @returns Promise resolving to `{ data: value, ... }` echoed from the slave.
    * @throws Same as {@link readCoils}.
    */
-  public writeSingleCoil(unit: 0, address: number, value: number, timeout?: number): Promise<void>;
-  public writeSingleCoil(unit: number, address: number, value: number, timeout?: number): Promise<ModbusResponse<number>>;
-  public writeSingleCoil(unit: number, address: number, value: number, timeout = this.timeout): Promise<ModbusResponse<number> | void> {
+  public writeSingleCoil(unit: 0, address: number, value: 0 | 1, timeout?: number): Promise<void>;
+  public writeSingleCoil(unit: number, address: number, value: 0 | 1, timeout?: number): Promise<ModbusResponse<0 | 1>>;
+  public writeSingleCoil(unit: number, address: number, value: 0 | 1, timeout = this.timeout): Promise<ModbusResponse<0 | 1> | void> {
     const fc = FunctionCode.WRITE_SINGLE_COIL;
 
     const bufferTx = Buffer.allocUnsafe(4);
@@ -1042,7 +1042,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     bufferTx[2] = (coilValue >>> 8) & 0xff;
     bufferTx[3] = coilValue & 0xff;
 
-    return new Promise<ModbusResponse<number> | void>((resolve, reject) => {
+    return new Promise<ModbusResponse<0 | 1> | void>((resolve, reject) => {
       this._send(unit, fc, bufferTx, timeout, unit === 0, (err, frame) => {
         if (err) {
           reject(err);
@@ -1060,7 +1060,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
         try {
           validateEchoResponse(frame, unit, fc, bufferTx);
           (frame as { data: unknown }).data = value;
-          resolve(frame as unknown as ModbusResponse<number>);
+          resolve(frame as unknown as ModbusResponse<0 | 1>);
         } catch (e) {
           reject(e);
         }

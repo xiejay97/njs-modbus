@@ -64,7 +64,7 @@ export function createProcessUnit(initialHoldingRegisters: number[]): ModbusUnit
       callback(null, coils.slice(address, end));
     },
 
-    writeSingleCoil: (address: number, value: number, callback) => {
+    writeSingleCoil: (address: number, value: 0 | 1, callback) => {
       if (address >= coils.length) {
         callback(ErrorCode.ILLEGAL_DATA_ADDRESS);
         return;

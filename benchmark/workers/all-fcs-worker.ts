@@ -155,7 +155,7 @@ function createNjsModbusSlave(physicalLayer: TcpServerPhysicalLayer): Promise<Mo
         readInputRegisters: (address: number, length: number, callback) => {
           callback(null, inputRegStore.subarray(address, address + length));
         },
-        writeSingleCoil: (address: number, value: number, callback) => {
+        writeSingleCoil: (address: number, value: 0 | 1, callback) => {
           coilStore[address] = value;
           callback(null);
         },
