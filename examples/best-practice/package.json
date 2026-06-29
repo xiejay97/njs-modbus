@@ -6,6 +6,7 @@
   "scripts": {
     "server": "tsx slave.ts",
     "client": "tsx master.ts",
+    "reconnect": "tsx reconnect.ts",
     "demo": "tsx slave.ts & sleep 1 && tsx master.ts"
   },
   "dependencies": {

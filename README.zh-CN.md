@@ -201,6 +201,10 @@ physical.open({ path: '/dev/ttyUSB0', baudRate: 115200 });
 
 [`examples/`](https://github.com/xiejay97/njs-modbus/tree/main/examples) 目录包含可运行的主站/从站示例，涵盖访问控制、审计日志、TLS 以及 WebSocket 等自定义传输层。
 
+### 重连
+
+`njs-modbus` 不提供内置自动重连。重连是应用层职责：合适的退避策略、重试预算与关闭行为取决于你的部署环境。[`examples/best-practice/`](https://github.com/xiejay97/njs-modbus/tree/main/examples/best-practice) 示例展示了一套生产可用的模式，包括指数退避、抖动、重试预算与优雅关闭。
+
 ---
 
 ## 架构

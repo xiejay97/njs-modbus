@@ -201,6 +201,10 @@ physical.open({ path: '/dev/ttyUSB0', baudRate: 115200 });
 
 See [`examples/`](https://github.com/xiejay97/njs-modbus/tree/main/examples) for runnable master/slave pairs, including access control, audit logging, TLS, and custom transports such as WebSocket.
 
+### Reconnection
+
+`njs-modbus` does not provide built-in auto-reconnect. Reconnection is an application concern: the right backoff, retry budget, and shutdown behavior depend on your deployment. The [`examples/best-practice/`](https://github.com/xiejay97/njs-modbus/tree/main/examples/best-practice) example shows a production-ready pattern with exponential backoff, jitter, a retry budget, and graceful shutdown.
+
 ---
 
 ## Architecture
