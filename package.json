@@ -1,6 +1,6 @@
 {
   "name": "njs-modbus",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "description": "A zero-dependency Modbus protocol library for Node.js with TCP, RTU, ASCII, UDP, and TLS support.",
   "keywords": [
     "modbus",
