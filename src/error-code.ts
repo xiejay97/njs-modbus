@@ -42,16 +42,23 @@ export enum ErrorCode {
 }
 
 const ERROR_MESSAGES: Record<ErrorCode, string> = {
-  [ErrorCode.ILLEGAL_FUNCTION]: 'Illegal function',
-  [ErrorCode.ILLEGAL_DATA_ADDRESS]: 'Illegal data address',
-  [ErrorCode.ILLEGAL_DATA_VALUE]: 'Illegal data value',
-  [ErrorCode.SERVER_DEVICE_FAILURE]: 'Server device failure',
-  [ErrorCode.ACKNOWLEDGE]: 'Acknowledge',
-  [ErrorCode.SERVER_DEVICE_BUSY]: 'Server device busy',
-  [ErrorCode.MEMORY_PARITY_ERROR]: 'Memory parity error',
-  [ErrorCode.GATEWAY_PATH_UNAVAILABLE]: 'Gateway path unavailable',
-  [ErrorCode.GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND]: 'Gateway target device failed to respond',
+  [ErrorCode.ILLEGAL_FUNCTION]: 'Illegal function (CODE 0x01)',
+  [ErrorCode.ILLEGAL_DATA_ADDRESS]: 'Illegal data address (CODE 0x02)',
+  [ErrorCode.ILLEGAL_DATA_VALUE]: 'Illegal data value (CODE 0x03)',
+  [ErrorCode.SERVER_DEVICE_FAILURE]: 'Server device failure (CODE 0x04)',
+  [ErrorCode.ACKNOWLEDGE]: 'Acknowledge (CODE 0x05)',
+  [ErrorCode.SERVER_DEVICE_BUSY]: 'Server device busy (CODE 0x06)',
+  [ErrorCode.MEMORY_PARITY_ERROR]: 'Memory parity error (CODE 0x08)',
+  [ErrorCode.GATEWAY_PATH_UNAVAILABLE]: 'Gateway path unavailable (CODE 0x0a)',
+  [ErrorCode.GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND]: 'Gateway target device failed to respond (CODE 0x0b)',
 };
+
+/** Reverse lookup from the spec-defined English message back to its wire code. */
+const MESSAGE_TO_ERROR_CODE: Record<string, ErrorCode> = {};
+for (const codeStr of Object.keys(ERROR_MESSAGES)) {
+  const code = Number(codeStr) as ErrorCode;
+  MESSAGE_TO_ERROR_CODE[ERROR_MESSAGES[code]] = code;
+}
 
 /**
  * Strongly-typed `Error` subclass that carries a Modbus exception code.
@@ -90,12 +97,33 @@ export function getErrorByCode(code: ErrorCode): ModbusError {
 }
 
 /**
+ * Look up a Modbus exception code from its spec-defined English message text.
+ *
+ * This is useful when an error has crossed a realm or structured-clone boundary
+ * and lost its typed `code` property: the clone preserves `message` but rebuilds
+ * the object as a plain `Error` with `name === 'Error'`. Custom messages set on
+ * a {@link ModbusError} constructor will not be present in the lookup table and
+ * therefore return `undefined`.
+ *
+ * @param message Error message to resolve; matched exactly against the spec labels.
+ * @returns The matching {@link ErrorCode}, or `undefined` if the message is not
+ *   a recognised spec label.
+ */
+export function getErrorCodeByMessage(message: string): ErrorCode | undefined {
+  return MESSAGE_TO_ERROR_CODE[message];
+}
+
+/**
  * Map an arbitrary `Error` back to a Modbus exception code for transport on
  * the wire. Used by the slave dispatch path when a user handler throws.
  *
  * Recognises `ModbusError` instances by `name === 'ModbusError'` and a valid
- * `code`; everything else is normalized to `SERVER_DEVICE_FAILURE` (0x04),
- * the spec-defined catch-all for internal slave failures.
+ * `code`. If the code is missing or invalid, or if the error has been rebuilt
+ * by structured cloning (which drops custom own properties such as `code` and
+ * resets `name` to `'Error'`), the function falls back to matching the
+ * spec-defined message text via {@link getErrorCodeByMessage}. Everything else
+ * is normalized to `SERVER_DEVICE_FAILURE` (0x04), the spec-defined catch-all
+ * for internal slave failures.
  *
  * @param err Error thrown by user code (or surfaced by the runtime).
  * @returns A wire-encodable {@link ErrorCode}; never throws.
@@ -106,6 +134,13 @@ export function getCodeByError(err: Error): ErrorCode {
     if (code in ErrorCode) {
       return code;
     }
+  }
+  // Structured cloning preserves `message` but drops custom own properties such
+  // as `code`, and resets `name` to `'Error'`. Recover from the spec-defined
+  // message text when possible.
+  const code = getErrorCodeByMessage(err.message);
+  if (code !== undefined) {
+    return code;
   }
   return ErrorCode.SERVER_DEVICE_FAILURE;
 }

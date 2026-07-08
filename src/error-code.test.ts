@@ -13,7 +13,7 @@
  *     https://mariadb.com/bsl11/
  */
 
-import { ErrorCode, getCodeByError, getErrorByCode, ModbusError } from './error-code';
+import { ErrorCode, getCodeByError, getErrorByCode, getErrorCodeByMessage, ModbusError } from './error-code';
 
 describe('ErrorCode', () => {
   it('should map every ErrorCode to a human-readable message', () => {
@@ -45,5 +45,29 @@ describe('ErrorCode', () => {
     const err = new ModbusError(ErrorCode.ACKNOWLEDGE, 'custom');
     expect(err.message).toBe('custom');
     expect(err.code).toBe(ErrorCode.ACKNOWLEDGE);
+  });
+
+  it('should look up ErrorCode by spec-defined message', () => {
+    expect(getErrorCodeByMessage('Illegal function (CODE 0x01)')).toBe(ErrorCode.ILLEGAL_FUNCTION);
+    expect(getErrorCodeByMessage('Illegal data address (CODE 0x02)')).toBe(ErrorCode.ILLEGAL_DATA_ADDRESS);
+    expect(getErrorCodeByMessage('Server device failure (CODE 0x04)')).toBe(ErrorCode.SERVER_DEVICE_FAILURE);
+  });
+
+  it('should return undefined for unknown or custom messages', () => {
+    expect(getErrorCodeByMessage('custom')).toBeUndefined();
+    expect(getErrorCodeByMessage('Generic failure')).toBeUndefined();
+  });
+
+  it('should recover the ErrorCode from a structured-cloned ModbusError via its message', () => {
+    const err = new ModbusError(ErrorCode.ILLEGAL_DATA_VALUE);
+    const cloned = structuredClone(err);
+    expect(cloned.name).toBe('Error');
+    expect((cloned as ModbusError).code).toBeUndefined();
+    expect(getCodeByError(cloned)).toBe(ErrorCode.ILLEGAL_DATA_VALUE);
+  });
+
+  it('should recover the ErrorCode from a plain Error with a spec-defined message', () => {
+    const err = new Error('Gateway path unavailable (CODE 0x0a)');
+    expect(getCodeByError(err)).toBe(ErrorCode.GATEWAY_PATH_UNAVAILABLE);
   });
 });

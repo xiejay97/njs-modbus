@@ -37,7 +37,7 @@ export type {
 /**
  * Modbus exception codes and the typed error that carries them.
  */
-export { ErrorCode, ModbusError, getErrorByCode, getCodeByError } from './error-code';
+export { ErrorCode, ModbusError, getErrorByCode, getCodeByError, getErrorCodeByMessage } from './error-code';
 
 /**
  * Framing helpers: CRC-16 (exported as `crc`), LRC, ADU fingerprinting, and
