@@ -7,3 +7,5 @@ catalog:
 allowBuilds:
   '@serialport/bindings-cpp': true
   esbuild: true
+minimumReleaseAgeExclude:
+  - tsdown@0.22.4

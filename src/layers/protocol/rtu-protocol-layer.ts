@@ -139,8 +139,7 @@ export interface RtuProtocolLayer {
    * predict the total frame length from leading bytes.
    */
   customFunctionCodes: (
-    | (CustomFunctionCode & { determineFrameLength: (getByte: (idx: number) => number, length: number) => number })
-    | undefined
+    (CustomFunctionCode & { determineFrameLength: (getByte: (idx: number) => number, length: number) => number }) | undefined
   )[];
 
   /**
