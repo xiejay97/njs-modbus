@@ -1,5 +1,11 @@
 # Changelog
 
+## [4.1.0](https://github.com/xiejay97/njs-modbus/compare/v4.0.1...v4.1.0) (2026-07-08)
+
+### Features
+
+* **error-code:** add getErrorCodeByMessage and embed exception code in message ([c31f1d0](https://github.com/xiejay97/njs-modbus/commit/c31f1d02f4ed718937b2d3857943b338b00b1bd4))
+
 ## [4.0.1](https://github.com/xiejay97/njs-modbus/compare/v4.0.0...v4.0.1) (2026-06-29)
 
 ### Bug Fixes
