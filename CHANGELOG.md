@@ -1,5 +1,18 @@
 # Changelog
 
+## [5.0.0](https://github.com/xiejay97/njs-modbus/compare/v4.1.0...v5.0.0) (2026-08-04)
+
+### ⚠ BREAKING CHANGES
+
+* **master:** the `timeout` option and per-method `timeout` parameter are
+  removed. Use `responseTimeout` (deadline for the first response byte, default
+  1000 ms) and `totalTimeout` (optional hard cap on the full cycle; when omitted
+  a stalled response may hang indefinitely).
+
+### Features
+
+* **master:** split timeout into responseTimeout and totalTimeout ([375422f](https://github.com/xiejay97/njs-modbus/commit/375422f8503f74fa8ce9ee310b699ee64f3229b9))
+
 ## [4.1.0](https://github.com/xiejay97/njs-modbus/compare/v4.0.1...v4.1.0) (2026-07-08)
 
 ### Features
