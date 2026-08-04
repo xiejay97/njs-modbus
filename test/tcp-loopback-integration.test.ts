@@ -29,7 +29,7 @@ describe('TCP loopback integration', () => {
         const master = new ModbusMaster({
           pipelineAdapter: pipeline,
           protocol: { type: 'TCP' },
-          timeout: 500,
+          responseTimeout: 500,
         });
         resolve(master);
       });
@@ -74,7 +74,7 @@ describe('TCP loopback integration', () => {
         const master = new ModbusMaster({
           pipelineAdapter: pipeline,
           protocol: { type: 'TCP' },
-          timeout: 500,
+          responseTimeout: 500,
         });
         resolve(master);
       });
@@ -124,7 +124,7 @@ describe('TCP loopback integration', () => {
         const master = new ModbusMaster({
           pipelineAdapter: pipeline,
           protocol: { type: 'TCP' },
-          timeout: 500,
+          responseTimeout: 500,
         });
         resolve(master);
       });

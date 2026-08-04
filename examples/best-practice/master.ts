@@ -49,7 +49,7 @@ physical.on('connect', (pipeline) => {
     pipelineAdapter: pipeline,
     protocol: { type: 'TCP' },
     queueStrategy: MASTER_QUEUE_STRATEGY,
-    timeout: MASTER_TIMEOUT_MS,
+    responseTimeout: MASTER_TIMEOUT_MS,
   });
 
   // Best practice: mirror the slave-side authorizer on the master so illegal

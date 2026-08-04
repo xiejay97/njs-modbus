@@ -54,6 +54,29 @@ export abstract class AbstractProtocolLayer {
   public onFrameError?: (event: FrameErrorEvent) => void;
   /** Callback invoked when a malformed or incomplete frame is discarded. Receives a lazy producer. */
   public onFrameErrorLazy?: (lazy: () => FrameErrorEvent) => void;
+  /**
+   * Callback invoked when the framing layer has parsed enough of a new inbound
+   * frame to identify the request it answers.
+   *
+   * - **TCP** - fires once the 7-byte MBAP header is validated, carrying the
+   *   transaction id parsed from header bytes 0-1 so a concurrent master can
+   *   attribute the response-start to one specific in-flight request. Emitted
+   *   only when the frame is not yet complete in the current chunk; a frame that
+   *   completes synchronously is delivered via `onFrame`, which settles the
+   *   exchange directly.
+   * - **RTU / ASCII** - never emitted (no transaction id). The master instead
+   *   marks the single in-flight request as responded straight from the pipeline
+   *   `data` event, since these transports are never concurrent.
+   *
+   * The master uses this to set a per-request "responded" flag so the response
+   * (first-byte) timer does not reject once the slave has started answering.
+   *
+   * Slaves leave this unset; the guard is `if (this.onTransactionId)` so the cost
+   * is a single branch on the decode hot path when no consumer is attached.
+   *
+   * @param transactionId MBAP transaction id parsed from the inbound header.
+   */
+  public onTransactionId?: (transactionId: number) => void;
 
   /**
    * Registry of custom function codes for variable-length frame prediction.

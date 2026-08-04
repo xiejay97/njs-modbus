@@ -184,6 +184,15 @@ export class TcpProtocolLayer extends AbstractProtocolLayer {
       const needBytes = frameLen - residualLen;
 
       if (dataLen < needBytes) {
+        // MBAP header validated (protocol id + length) but the PDU is still
+        // incomplete - the response has started arriving. Surface the parsed
+        // transaction id so the master can mark the matching request as responded.
+        // The tid spans the residual/data boundary: byte 0 is always in the
+        // residual (residualLen >= 1 here); byte 1 is in the residual only when
+        // >= 2 residual bytes were carried over, otherwise it is the first new byte.
+        if (this.onTransactionId) {
+          this.onTransactionId((this._residual[0] << 8) | (residualLen > 1 ? this._residual[1] : data[0]));
+        }
         data.copy(this._residual, residualLen, 0, dataLen);
         this._residualLen += dataLen;
         return;
@@ -285,6 +294,13 @@ export class TcpProtocolLayer extends AbstractProtocolLayer {
       }
 
       if (dataLen < dataIndex + frameLen) {
+        // Header at `dataIndex` is validated but the full frame has not yet
+        // arrived in this chunk - the response has started. Surface the parsed
+        // transaction id (bytes 0-1 of this frame, both in-bounds because the
+        // protocol-id check above already read `data[dataIndex+2..+5]`).
+        if (this.onTransactionId) {
+          this.onTransactionId((data[dataIndex] << 8) | data[dataIndex + 1]);
+        }
         break;
       }
 

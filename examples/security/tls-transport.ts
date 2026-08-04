@@ -83,7 +83,7 @@ async function runClient(): Promise<void> {
       const master = new ModbusMaster({
         pipelineAdapter: pipeline,
         protocol: { type: 'TCP' },
-        timeout: 1000,
+        responseTimeout: 1000,
       });
       resolve(master);
     });

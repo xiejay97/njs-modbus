@@ -85,4 +85,59 @@ describe('MasterSession', () => {
     expect(errors).toHaveLength(2);
     expect(errors[0].message).toBe('connection lost');
   });
+
+  it('should fire the onResponded hook only for the matching key', () => {
+    const session = new MasterSession();
+    const responded: number[] = [];
+    session.start(
+      1,
+      () => void 0,
+      () => responded.push(1),
+    );
+    session.start(
+      2,
+      () => void 0,
+      () => responded.push(2),
+    );
+
+    session.notifyResponded(2);
+
+    expect(responded).toEqual([2]);
+  });
+
+  it('should ignore notifyResponded for unknown keys and dropped waiters', () => {
+    const session = new MasterSession();
+    let fired = false;
+    session.start(
+      1,
+      () => void 0,
+      () => {
+        fired = true;
+      },
+    );
+    session.stop(1);
+
+    // Late response after settle / bus noise with nothing in flight: no throw.
+    session.notifyResponded(1);
+    session.notifyResponded(99);
+
+    expect(fired).toBe(false);
+  });
+
+  it('should not fire the onResponded hook after the waiter settles', () => {
+    const session = new MasterSession();
+    let fired = false;
+    session.start(
+      1,
+      () => void 0,
+      () => {
+        fired = true;
+      },
+    );
+    session.handleFrame({ transaction: 1, unit: 1, fc: 0x03, data: Buffer.alloc(0), buffer: Buffer.alloc(0) });
+
+    session.notifyResponded(1);
+
+    expect(fired).toBe(false);
+  });
 });

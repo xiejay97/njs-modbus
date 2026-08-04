@@ -47,9 +47,10 @@ export interface ModbusMasterEvents {
  * The `protocol` discriminator selects the application-layer codec (RTU / TCP /
  * ASCII); each protocol accepts an optional `opts` bag (RTU/ASCII framing
  * options, or `{ transactionId }` for TCP to seed the 16-bit MBAP transaction
- * counter); `queueStrategy` and `timeout` tune the request scheduler; and an
- * optional `customFunctionCodes` array can be seeded at construction time so the
- * master recognises non-standard function codes immediately.
+ * counter); `queueStrategy`, `responseTimeout`, and `totalTimeout` tune the
+ * request scheduler; and an optional `customFunctionCodes` array can be seeded at
+ * construction time so the master recognises non-standard function codes
+ * immediately.
  *
  * @template P Transport protocol literal — `'TCP'`, `'RTU'`, or `'ASCII'`.
  */
@@ -69,8 +70,26 @@ export interface ModbusMasterOptions<P extends 'TCP' | 'RTU' | 'ASCII'> {
    * - 'concurrent': concurrent async dispatch (⚠️ Modbus TCP or multi-link Master only, use with caution on RTU bus).
    */
   queueStrategy?: P extends 'TCP' ? ModbusQueueStrategy : Exclude<ModbusQueueStrategy, 'concurrent'>;
-  /** Per-request timeout in ms. Default 1000. */
-  timeout?: number;
+  /**
+   * Per-request response timeout in milliseconds - the deadline for the first
+   * response byte ("data started returning"). When the deadline elapses with no
+   * inbound bytes the request is rejected with `Error('Request timed out')`.
+   * The deadline is disarmed as soon as the protocol layer signals that the
+   * response has started arriving (per-transaction for TCP, single in-flight for
+   * RTU/ASCII). `Infinity` disables the first-byte deadline entirely (the
+   * {@link totalTimeout} then guards the cycle, when finite). Default `1000`.
+   */
+  responseTimeout?: number;
+  /**
+   * Per-request total timeout in milliseconds - a hard cap on the full
+   * request/response cycle. `Infinity` (default) enforces no cap: a response
+   * that starts arriving but never completes will hang indefinitely. Set a
+   * finite value to guarantee termination; a single request can still opt back
+   * out by passing `Infinity` at the call site. For broadcasts it also caps
+   * the write-completion deadline (falling back to {@link responseTimeout}
+   * when `Infinity`).
+   */
+  totalTimeout?: number;
 }
 
 /**
@@ -93,6 +112,15 @@ export interface ModbusResponse<T> {
 
 interface PendingEntry {
   settled: boolean;
+  /**
+   * `true` once any byte of the response has arrived for this request. Set by
+   * the TCP `onTransactionId` signal (matched by transaction id) or, for
+   * RTU/ASCII, straight from the pipeline `data` event (single in-flight
+   * request). The response (first-byte) timer checks this on expiry: if set,
+   * the slave started responding and the timer does not reject (deferring to
+   * the total timer or no cap); if still `false`, the slave never answered.
+   */
+  responded: boolean;
   callback: ((error: Error | null, frame?: ModbusFrame) => void) | null;
   sessionKey: string | number | null;
 }
@@ -206,8 +234,15 @@ function validateEchoResponse(frame: ModbusFrame, unit: number, fc: number, expe
 export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEventEmitter<ModbusMasterEvents> {
   /** Resolved queue strategy — see {@link ModbusQueueStrategy}. */
   public readonly queueStrategy: ModbusQueueStrategy;
-  /** Default per-request timeout in milliseconds. */
-  public readonly timeout: number;
+  /** Default per-request response timeout in milliseconds - deadline for the first response byte. */
+  public readonly responseTimeout: number;
+  /**
+   * Default per-request total timeout in milliseconds - hard cap on the full
+   * request/response cycle. `Infinity` means no cap: a response that starts
+   * arriving but never completes will hang indefinitely. Set a finite value to
+   * guarantee termination.
+   */
+  public readonly totalTimeout: number;
 
   /**
    * The next 16-bit TCP transaction identifier that will be stamped into an
@@ -232,7 +267,12 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
   private _queueUnits: number[] = [];
   private _queueFcs: number[] = [];
   private _queueDatas: Buffer[] = [];
-  private _queueTimeouts: number[] = [];
+  // responseTimeout (a real ms or Infinity) and totalTimeout (a real ms or
+  // Infinity = no cap) kept as two packed-number arrays rather than one object
+  // array; Infinity entries are doubles, so the arrays may transition to
+  // PACKED_DOUBLE elements but never become holey.
+  private _queueResponseTimeouts: number[] = [];
+  private _queueTotalTimeouts: number[] = [];
   private _queueBroadcasts: boolean[] = [];
   private _queueCallbacks: ((error: Error | null, frame?: ModbusFrame) => void)[] = [];
   private _queueFingerprints: (number | null)[] = [];
@@ -245,27 +285,32 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
   // Global timer heap with lazy deletion — one native setTimeout for all requests.
   private _pendingExchanges = new Map<number, PendingEntry>();
   private _timerHeap = new TimerHeap((id: number) => {
-    const pending = this._pendingExchanges.get(id);
+    // Composite id scheme: even = responseTimeout (first byte), odd = totalTimeout
+    // (full cycle). Composed arithmetically (`exchangeId * 2 + slot`) rather than
+    // with 32-bit bit ops so the encoding stays exact up to 2^52 exchanges —
+    // `<< 1` would truncate at 2^31 and silently disarm every later exchange's
+    // timers. Demultiplex back to the exchange; the response timer does not
+    // reject if the slave already started responding (`responded` flag set).
+    const exchangeId = Math.floor(id / 2);
+    const isTotal = id % 2 === 1;
+    const pending = this._pendingExchanges.get(exchangeId);
     if (!pending) {
       return;
     } // lazy deletion: already handled
-    pending.settled = true;
-    this._pendingExchanges.delete(id);
-    if (pending.sessionKey !== null) {
-      this._masterSession.stop(pending.sessionKey);
+    if (!isTotal && pending.responded) {
+      // First byte already arrived - the slave started responding. Leave the
+      // exchange pending; the total timer (or no cap) guards the remainder.
+      return;
     }
-    const cb = pending.callback;
-    if (cb) {
-      pending.callback = null;
-      cb(new Error('Request timed out'));
-    }
+    this._settleExchange(exchangeId, pending, new Error('Request timed out'));
   });
 
   /**
    * @param options Construction options; `protocol` is mandatory,
-   *   `queueStrategy` defaults to `'drop-stale'`, and `timeout`
-   *   defaults to 1000 ms. An optional `customFunctionCodes` array can be
-   *   supplied to pre-register non-standard function codes.
+   *   `queueStrategy` defaults to `'drop-stale'`, `responseTimeout`
+   *   defaults to 1000 ms, and `totalTimeout` defaults to `Infinity` (no cap).
+   *   An optional `customFunctionCodes` array can be supplied to pre-register
+   *   non-standard function codes.
    * @returns A new {@link ModbusMaster} instance.
    * @throws `Error('Concurrent mode requires a Modbus TCP protocol layer')`
    *   when `queueStrategy: 'concurrent'` is paired with a non-TCP protocol —
@@ -276,7 +321,8 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     super();
 
     this.queueStrategy = options.queueStrategy ?? 'drop-stale';
-    this.timeout = options.timeout ?? 1000;
+    this.responseTimeout = options.responseTimeout ?? 1000;
+    this.totalTimeout = options.totalTimeout ?? Infinity;
     const protocol = options.protocol;
     const protocolLayer: AbstractProtocolLayer =
       protocol.type === 'TCP'
@@ -307,7 +353,22 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     protocolLayer.onFrameError = onFrameError;
     this._cleanupSession.add(cleanupFrameError);
 
+    const cleanupTransactionId = () => (protocolLayer.onTransactionId = undefined);
+    const onTransactionId = (transactionId: number) => {
+      // TCP: the framing layer parsed the MBAP transaction id - mark the
+      // matching in-flight request as responded (concurrent-safe attribution).
+      this._masterSession.notifyResponded(transactionId);
+    };
+    protocolLayer.onTransactionId = onTransactionId;
+    this._cleanupSession.add(cleanupTransactionId);
+
     const onData = (data: Buffer) => {
+      // RTU/ASCII are never concurrent: at most one non-broadcast request is in
+      // flight, so any inbound byte marks that request as responded. TCP uses
+      // the per-transaction `onTransactionId` signal above instead.
+      if (protocolLayer.PROTOCOL !== 'TCP') {
+        this._masterSession.notifyResponded(FIFO_KEY);
+      }
       this._protocolLayer.decode(data);
     };
     pipelineAdapter.on('data', onData);
@@ -349,7 +410,10 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @param unit Unit / slave address byte (0..247).
    * @param fc Modbus function code byte (0..255).
    * @param data PDU payload bytes (length 0..253).
-   * @param timeout Per-request timeout override in milliseconds.
+   * @param responseTimeout Per-request response timeout override in milliseconds
+   *   (deadline for the first response byte).
+   * @param totalTimeout Per-request total timeout override in milliseconds, or
+   *   `Infinity` to disable the full-cycle cap.
    * @param broadcast `true` when `unit === 0` (no response awaited).
    * @param callback Callback invoked with `(err, frame)` on completion.
    * @returns `void`.
@@ -364,7 +428,8 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     unit: number,
     fc: number,
     data: Buffer,
-    timeout: number,
+    responseTimeout: number,
+    totalTimeout: number,
     broadcast: boolean,
     callback: (error: Error | null, frame?: ModbusFrame) => void,
   ): void {
@@ -399,7 +464,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
           }
 
           if (this.queueStrategy === 'concurrent') {
-            this._exchange(unit, fc, data, timeout, broadcast, callback);
+            this._exchange(unit, fc, data, responseTimeout, totalTimeout, broadcast, callback);
             return;
           }
 
@@ -413,7 +478,8 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
               this._queueUnits.length = 0;
               this._queueFcs.length = 0;
               this._queueDatas.length = 0;
-              this._queueTimeouts.length = 0;
+              this._queueResponseTimeouts.length = 0;
+              this._queueTotalTimeouts.length = 0;
               this._queueBroadcasts.length = 0;
               this._queueCallbacks.length = 0;
               this._queueFingerprints.length = 0;
@@ -436,7 +502,8 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
                     this._queueUnits[writeIdx] = qUnit;
                     this._queueFcs[writeIdx] = qFc;
                     this._queueDatas[writeIdx] = qData;
-                    this._queueTimeouts[writeIdx] = this._queueTimeouts[i];
+                    this._queueResponseTimeouts[writeIdx] = this._queueResponseTimeouts[i];
+                    this._queueTotalTimeouts[writeIdx] = this._queueTotalTimeouts[i];
                     this._queueBroadcasts[writeIdx] = this._queueBroadcasts[i];
                     this._queueCallbacks[writeIdx] = this._queueCallbacks[i];
                     this._queueFingerprints[writeIdx] = qKey;
@@ -448,7 +515,8 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
               this._queueUnits.length = writeIdx;
               this._queueFcs.length = writeIdx;
               this._queueDatas.length = writeIdx;
-              this._queueTimeouts.length = writeIdx;
+              this._queueResponseTimeouts.length = writeIdx;
+              this._queueTotalTimeouts.length = writeIdx;
               this._queueBroadcasts.length = writeIdx;
               this._queueCallbacks.length = writeIdx;
               this._queueFingerprints.length = writeIdx;
@@ -462,7 +530,8 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
           this._queueUnits.push(unit);
           this._queueFcs.push(fc);
           this._queueDatas.push(data);
-          this._queueTimeouts.push(timeout);
+          this._queueResponseTimeouts.push(responseTimeout);
+          this._queueTotalTimeouts.push(totalTimeout);
           this._queueBroadcasts.push(broadcast);
           this._queueCallbacks.push(callback);
           this._queueFingerprints.push(fingerprint);
@@ -515,12 +584,13 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
         const unit = this._queueUnits[h];
         const fc = this._queueFcs[h];
         const data = this._queueDatas[h];
-        const timeout = this._queueTimeouts[h];
+        const responseTimeout = this._queueResponseTimeouts[h];
+        const totalTimeout = this._queueTotalTimeouts[h];
         const broadcast = this._queueBroadcasts[h];
         const callback = this._queueCallbacks[h];
         // Drop references so the GC can reclaim data buffers and callback
         // closures while the rest of the queue is still draining. Primitives
-        // (unit/fc/timeout/broadcast) need no clearing.
+        // (unit/fc/responseTimeout/totalTimeout/broadcast) need no clearing.
         this._queueDatas[h] = undefined as any;
         this._queueCallbacks[h] = undefined as any;
         this._queueFingerprints[h] = null;
@@ -532,7 +602,8 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
           this._queueUnits.length = 0;
           this._queueFcs.length = 0;
           this._queueDatas.length = 0;
-          this._queueTimeouts.length = 0;
+          this._queueResponseTimeouts.length = 0;
+          this._queueTotalTimeouts.length = 0;
           this._queueBroadcasts.length = 0;
           this._queueCallbacks.length = 0;
           this._queueFingerprints.length = 0;
@@ -541,7 +612,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
 
         let completed = false;
         let returned = false;
-        this._exchange(unit, fc, data, timeout, broadcast, (err, frame) => {
+        this._exchange(unit, fc, data, responseTimeout, totalTimeout, broadcast, (err, frame) => {
           callback(err, frame);
           if (returned) {
             next();
@@ -567,19 +638,25 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    *
    * 1. Allocate an `exchangeId` and register a {@link PendingEntry} so
    *    every async checkpoint can detect cancellation in O(1).
-   * 2. Arm the timeout via `TimerHeap`: one shared native
-   *    `setTimeout` for ≥3 in-flight requests; per-request timers below
-   *    that. On expiry, the heap callback flips `settled = true` and
-   *    fires `Error('Request timed out')`.
+   * 2. Arm the response (first-byte) and total (full-cycle) timers via
+   *    `TimerHeap` using composite ids (`exchangeId * 2` / `+ 1`): one shared
+   *    native `setTimeout` for ≥3 in-flight timers; per-request timers below
+   *    that. On expiry the heap callback rejects with `Error('Request timed
+   *    out')` unless the response timer fires after the slave already started
+   *    responding (`responded` flag set), in which case it stays the rejection
+   *    and leaves the total timer (or no cap) to guard the remainder.
    * 3. For non-broadcast TCP frames, allocate the next free transaction
    *    id (skipping ids already in the session map), encode the ADU, and
    *    register a `MasterSession` waiter keyed on the tid **before**
    *    `pipeline.write()` is called. Registering the waiter first prevents
    *    responses that arrive before the write callback runs (loopback,
-   *    mock transports, or very fast slaves) from being discarded.
+   *    mock transports, or very fast slaves) from being discarded. The TCP
+   *    framing layer signals `onTransactionId` once the MBAP header is parsed,
+   *    marking the matching request `responded`.
    * 4. For non-broadcast RTU/ASCII frames, the session waiter is keyed on
    *    the `FIFO_KEY` constant — only one in-flight request can match at
-   *    a time, which is enforced by the upstream queue.
+   *    a time, which is enforced by the upstream queue. Any inbound byte
+   *    (pipeline `data` event) marks that request `responded`.
    * 5. For broadcasts (`unit === 0`), no response is expected — the
    *    callback fires as soon as the write resolves (success) or the
    *    timeout elapses.
@@ -591,7 +668,10 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @param unit Unit / slave address byte (0..247).
    * @param fc Modbus function code byte (0..255).
    * @param data PDU payload bytes (length 0..253).
-   * @param timeout Per-request timeout override in milliseconds.
+   * @param responseTimeout Per-request response timeout override in milliseconds
+   *   (deadline for the first response byte).
+   * @param totalTimeout Per-request total timeout override in milliseconds, or
+   *   `Infinity` to disable the full-cycle cap.
    * @param broadcast `true` when `unit === 0` (no response awaited).
    * @param callback Callback invoked with `(err, frame)` on completion.
    * @returns `void`.
@@ -609,18 +689,19 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     unit: number,
     fc: number,
     data: Buffer,
-    timeout: number,
+    responseTimeout: number,
+    totalTimeout: number,
     broadcast: boolean,
     callback: (error: Error | null, frame?: ModbusFrame) => void,
   ): void {
     if (!this._accessAuthorizer || !this._accessAuthorizer.checkRuntime) {
-      this._runExchange(unit, fc, data, timeout, broadcast, callback);
+      this._runExchange(unit, fc, data, responseTimeout, totalTimeout, broadcast, callback);
       return;
     }
 
     const auth = this._accessAuthorizer.checkRuntime(unit, fc, data);
     if (auth === true) {
-      return this._runExchange(unit, fc, data, timeout, broadcast, callback);
+      return this._runExchange(unit, fc, data, responseTimeout, totalTimeout, broadcast, callback);
     }
     if (auth === false) {
       const dataPreview = data.length > 20 ? `${data.subarray(0, 20).toString('hex')}...` : data.toString('hex');
@@ -646,7 +727,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
       if (typeof res === 'number') {
         return callback(getErrorByCode(res));
       }
-      this._runExchange(unit, fc, data, timeout, broadcast, callback);
+      this._runExchange(unit, fc, data, responseTimeout, totalTimeout, broadcast, callback);
     }, callback);
   }
 
@@ -660,7 +741,10 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @param unit Unit / slave address byte (0..247).
    * @param fc Modbus function code byte (0..255).
    * @param data PDU payload bytes (length 0..253).
-   * @param timeout Per-request timeout override in milliseconds.
+   * @param responseTimeout Per-request response timeout override in milliseconds
+   *   (deadline for the first response byte).
+   * @param totalTimeout Per-request total timeout override in milliseconds, or
+   *   `Infinity` to disable the full-cycle cap.
    * @param broadcast `true` when `unit === 0` (no response awaited).
    * @param callback Callback invoked with `(err, frame)` on completion.
    * @returns `void`.
@@ -669,7 +753,8 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     unit: number,
     fc: number,
     data: Buffer,
-    timeout: number,
+    responseTimeout: number,
+    totalTimeout: number,
     broadcast: boolean,
     callback: (error: Error | null, frame?: ModbusFrame) => void,
   ): void {
@@ -687,7 +772,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     // 3. When the response arrives, delete from Map — the heap entry is left
     //    behind and silently discarded when it surfaces at the top (lazy deletion).
     const exchangeId = this._nextExchangeId++;
-    const pending: PendingEntry = { settled: false, callback, sessionKey: null };
+    const pending: PendingEntry = { settled: false, responded: false, callback, sessionKey: null };
     this._pendingExchanges.set(exchangeId, pending);
 
     let tid: number | undefined;
@@ -699,24 +784,21 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     }
 
     if (broadcast) {
-      // Broadcast: no response expected. Skip the session entirely.
-      this._timerHeap.add(exchangeId, timeout);
+      // Broadcast: no response expected. responseTimeout (first-byte) does not
+      // apply; the write-completion deadline falls back to responseTimeout when
+      // totalTimeout is uncapped, preserving the historical default safety net.
+      // `Infinity` is the documented "no cap" value and must never reach
+      // TimerHeap (a native setTimeout clamps it to ~1 ms, which would fire
+      // instantly instead of never).
+      const broadcastDeadline = totalTimeout !== Infinity ? totalTimeout : responseTimeout;
+      if (broadcastDeadline !== Infinity) {
+        this._timerHeap.add(exchangeId * 2 + 1, broadcastDeadline);
+      }
       this._pipelineAdapter.write(this._protocolLayer.encode(unit, fc, data, tid), (writeErr) => {
         if (pending.settled) {
           return;
         }
-        const cb = pending.callback;
-        if (!cb) {
-          return;
-        }
-        pending.settled = true;
-        pending.callback = null;
-        this._pendingExchanges.delete(exchangeId);
-        if (writeErr) {
-          cb(writeErr);
-        } else {
-          cb(null);
-        }
+        this._settleExchange(exchangeId, pending, writeErr ?? null);
       });
       return;
     }
@@ -725,40 +807,74 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     const payload = this._protocolLayer.encode(unit, fc, data, tid);
 
     pending.sessionKey = key;
-    this._timerHeap.add(exchangeId, timeout);
+    // Arm the first-byte (response) deadline; the total deadline is armed
+    // separately. Both use composite ids (even = response, odd = total) so the
+    // heap callback can tell them apart. `Infinity` is the documented "no cap"
+    // value and must never reach TimerHeap (a native setTimeout clamps it to
+    // ~1 ms, which would reject instantly). No timer is cancelled when the
+    // slave starts responding - the response timer checks `responded` on
+    // expiry and stays its rejection if the slave already answered.
+    if (responseTimeout !== Infinity) {
+      this._timerHeap.add(exchangeId * 2, responseTimeout);
+    }
+    if (totalTimeout !== Infinity) {
+      this._timerHeap.add(exchangeId * 2 + 1, totalTimeout);
+    }
 
     // Register the session waiter BEFORE handing the bytes to the pipeline.
     // Responses can arrive before the write callback runs on loopback / mock
     // transports or in concurrent TCP mode; registering first guarantees the
     // frame is matched instead of dropped.
-    this._masterSession.start(key, (err, frame) => {
-      if (pending.settled) {
-        return;
-      }
-      const cb = pending.callback;
-      if (cb) {
-        pending.settled = true;
-        pending.callback = null;
-        this._pendingExchanges.delete(exchangeId);
-        cb(err, frame);
-      }
-    });
+    this._masterSession.start(
+      key,
+      (err, frame) => {
+        if (pending.settled) {
+          return;
+        }
+        this._settleExchange(exchangeId, pending, err, frame);
+      },
+      () => {
+        pending.responded = true;
+      },
+    );
 
     this._pipelineAdapter.write(payload, (writeErr?: Error | null) => {
       if (pending.settled) {
         return;
       }
       if (writeErr) {
-        const cb = pending.callback;
-        if (cb) {
-          pending.settled = true;
-          pending.callback = null;
-          this._pendingExchanges.delete(exchangeId);
-          this._masterSession.stop(key);
-          cb(writeErr);
-        }
+        this._settleExchange(exchangeId, pending, writeErr);
       }
     });
+  }
+
+  /**
+   * Settle a pending exchange exactly once: mark it settled, drop it from the
+   * pending map, cancel the session waiter (whose removal also drops the
+   * first-bytes hook), and deliver the result to the callback. Both
+   * composite-id timers are left for lazy deletion (the heap callback no-ops
+   * on a settled entry) - matching the original architecture, so no
+   * mid-flight `remove()` is needed.
+   *
+   * @param exchangeId The exchange id (heap ids are `exchangeId * 2` / `+ 1`).
+   * @param pending The pending entry; mutated in place.
+   * @param error `null` on success, the failure otherwise.
+   * @param frame The decoded frame on success.
+   */
+  private _settleExchange(exchangeId: number, pending: PendingEntry, error: Error | null, frame?: ModbusFrame): void {
+    if (pending.settled) {
+      return;
+    }
+    pending.settled = true;
+    this._pendingExchanges.delete(exchangeId);
+    if (pending.sessionKey !== null) {
+      this._masterSession.stop(pending.sessionKey);
+    }
+    const cb = pending.callback;
+    if (cb) {
+      pending.callback = null;
+      cb(error, frame);
+    }
   }
 
   /**
@@ -776,13 +892,16 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    *   `FunctionCode.READ_DISCRETE_INPUTS`.
    * @param address Zero-based starting address (0..0xFFFF).
    * @param length Number of discretes to read (1..2000).
-   * @param timeout Per-request timeout override in milliseconds.
+   * @param responseTimeout Per-request response-timeout override in milliseconds
+   *   - deadline for the first response byte.
+   * @param totalTimeout Per-request total-timeout override in milliseconds, or
+   *   `Infinity` for no cap on the full cycle.
    * @returns Promise resolving to `{ unit, fc, data, buffer }` where `data`
    *   is a length-`length` `(0 | 1)[]`, or `void` for broadcast.
    *
    * @note Hot Path: Strictly Inline. Do not refactor into sub-routines.
    */
-  private writeFC1Or2(unit: number, fc: number, address: number, length: number, timeout: number) {
+  private writeFC1Or2(unit: number, fc: number, address: number, length: number, responseTimeout: number, totalTimeout: number) {
     const byteCount = (length + 7) >> 3;
 
     const bufferTx = Buffer.allocUnsafe(4);
@@ -792,7 +911,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     bufferTx[3] = length & 0xff;
 
     return new Promise<ModbusResponse<(0 | 1)[]> | void>((resolve, reject) => {
-      this._send(unit, fc, bufferTx, timeout, unit === 0, (err, frame) => {
+      this._send(unit, fc, bufferTx, responseTimeout, totalTimeout, unit === 0, (err, frame) => {
         if (err) {
           reject(err);
           return;
@@ -865,17 +984,33 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    *   awaited; resolves with `void`).
    * @param address Zero-based coil starting address (0..0xFFFF).
    * @param length Number of coils to read (1..2000 per spec).
-   * @param timeout Per-request timeout override in milliseconds; defaults
-   *   to {@link timeout}.
+   * @param responseTimeout Per-request response-timeout override in milliseconds;
+   *   defaults to {@link responseTimeout}. Deadline for the first response byte.
+   * @param totalTimeout Per-request total-timeout override in milliseconds;
+   *   defaults to {@link totalTimeout}. Hard ceiling on the full cycle;
+   *   `Infinity` = no cap.
    * @returns Promise resolving to `{ unit, fc, data, buffer }` where `data`
    *   is a length-`length` `(0 | 1)[]` of 0/1 values.
-   * @throws `Error('Request timed out')` when no response arrives within `timeout`;
+   * @throws `Error('Request timed out')` when no response arrives within
+   *   `responseTimeout` (or the full cycle exceeds `totalTimeout` when set);
    *   typed {@link ModbusError} when the slave returns an exception response.
    */
-  public readCoils(unit: 0, address: number, length: number, timeout?: number): Promise<void>;
-  public readCoils(unit: number, address: number, length: number, timeout?: number): Promise<ModbusResponse<(0 | 1)[]>>;
-  public readCoils(unit: number, address: number, length: number, timeout = this.timeout): Promise<ModbusResponse<(0 | 1)[]> | void> {
-    return this.writeFC1Or2(unit, FunctionCode.READ_COILS, address, length, timeout);
+  public readCoils(unit: 0, address: number, length: number, responseTimeout?: number, totalTimeout?: number): Promise<void>;
+  public readCoils(
+    unit: number,
+    address: number,
+    length: number,
+    responseTimeout?: number,
+    totalTimeout?: number,
+  ): Promise<ModbusResponse<(0 | 1)[]>>;
+  public readCoils(
+    unit: number,
+    address: number,
+    length: number,
+    responseTimeout = this.responseTimeout,
+    totalTimeout = this.totalTimeout,
+  ): Promise<ModbusResponse<(0 | 1)[]> | void> {
+    return this.writeFC1Or2(unit, FunctionCode.READ_COILS, address, length, responseTimeout, totalTimeout);
   }
 
   /** Alias for {@link readDiscreteInputs}. */
@@ -887,19 +1022,29 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @param unit Unit / slave address; `0` = broadcast.
    * @param address Zero-based discrete-input starting address (0..0xFFFF).
    * @param length Number of inputs to read (1..2000).
-   * @param timeout Per-request timeout override (ms).
+   * @param responseTimeout Per-request response-timeout override (ms) - deadline
+   *   for the first response byte.
+   * @param totalTimeout Per-request total-timeout override (ms), or `Infinity`
+   *   for no cap on the full cycle; omit to inherit the instance default.
    * @returns Promise resolving to a `(0 | 1)[]` of 0/1 values, or `void` for broadcast.
    * @throws Same as {@link readCoils}.
    */
-  public readDiscreteInputs(unit: 0, address: number, length: number, timeout?: number): Promise<void>;
-  public readDiscreteInputs(unit: number, address: number, length: number, timeout?: number): Promise<ModbusResponse<(0 | 1)[]>>;
+  public readDiscreteInputs(unit: 0, address: number, length: number, responseTimeout?: number, totalTimeout?: number): Promise<void>;
   public readDiscreteInputs(
     unit: number,
     address: number,
     length: number,
-    timeout = this.timeout,
+    responseTimeout?: number,
+    totalTimeout?: number,
+  ): Promise<ModbusResponse<(0 | 1)[]>>;
+  public readDiscreteInputs(
+    unit: number,
+    address: number,
+    length: number,
+    responseTimeout = this.responseTimeout,
+    totalTimeout = this.totalTimeout,
   ): Promise<ModbusResponse<(0 | 1)[]> | void> {
-    return this.writeFC1Or2(unit, FunctionCode.READ_DISCRETE_INPUTS, address, length, timeout);
+    return this.writeFC1Or2(unit, FunctionCode.READ_DISCRETE_INPUTS, address, length, responseTimeout, totalTimeout);
   }
 
   /**
@@ -918,14 +1063,17 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    *   `FunctionCode.READ_INPUT_REGISTERS`.
    * @param address Zero-based starting address (0..0xFFFF).
    * @param length Number of registers to read (1..125).
-   * @param timeout Per-request timeout override in milliseconds.
+   * @param responseTimeout Per-request response-timeout override in milliseconds
+   *   - deadline for the first response byte.
+   * @param totalTimeout Per-request total-timeout override in milliseconds, or
+   *   `Infinity` for no cap on the full cycle.
    * @returns Promise resolving to `{ unit, fc, data, buffer }` where `data`
    *   is a length-`length` `number[]` of 16-bit register values, or `void`
    *   for broadcast.
    *
    * @note Hot Path: Strictly Inline. Do not refactor into sub-routines.
    */
-  private writeFC3Or4(unit: number, fc: number, address: number, length: number, timeout: number) {
+  private writeFC3Or4(unit: number, fc: number, address: number, length: number, responseTimeout: number, totalTimeout: number) {
     const byteCount = length * 2;
 
     const bufferTx = Buffer.allocUnsafe(4);
@@ -936,7 +1084,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     bufferTx[3] = length & 0xff;
 
     return new Promise<ModbusResponse<number[]> | void>((resolve, reject) => {
-      this._send(unit, fc, bufferTx, timeout, unit === 0, (err, frame) => {
+      this._send(unit, fc, bufferTx, responseTimeout, totalTimeout, unit === 0, (err, frame) => {
         if (err) {
           reject(err);
           return;
@@ -976,20 +1124,30 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @param unit Unit / slave address; `0` = broadcast.
    * @param address Zero-based register starting address (0..0xFFFF).
    * @param length Number of registers to read (1..125 per spec).
-   * @param timeout Per-request timeout override (ms).
+   * @param responseTimeout Per-request response-timeout override (ms) - deadline
+   *   for the first response byte.
+   * @param totalTimeout Per-request total-timeout override (ms), or `Infinity`
+   *   for no cap on the full cycle; omit to inherit the instance default.
    * @returns Promise resolving to a length-`length` `number[]` of 16-bit
    *   register values.
    * @throws Same as {@link readCoils}.
    */
-  public readHoldingRegisters(unit: 0, address: number, length: number, timeout?: number): Promise<void>;
-  public readHoldingRegisters(unit: number, address: number, length: number, timeout?: number): Promise<ModbusResponse<number[]>>;
+  public readHoldingRegisters(unit: 0, address: number, length: number, responseTimeout?: number, totalTimeout?: number): Promise<void>;
   public readHoldingRegisters(
     unit: number,
     address: number,
     length: number,
-    timeout = this.timeout,
+    responseTimeout?: number,
+    totalTimeout?: number,
+  ): Promise<ModbusResponse<number[]>>;
+  public readHoldingRegisters(
+    unit: number,
+    address: number,
+    length: number,
+    responseTimeout = this.responseTimeout,
+    totalTimeout = this.totalTimeout,
   ): Promise<ModbusResponse<number[]> | void> {
-    return this.writeFC3Or4(unit, FunctionCode.READ_HOLDING_REGISTERS, address, length, timeout);
+    return this.writeFC3Or4(unit, FunctionCode.READ_HOLDING_REGISTERS, address, length, responseTimeout, totalTimeout);
   }
 
   /** Alias for {@link readInputRegisters}. */
@@ -1001,19 +1159,29 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @param unit Unit / slave address; `0` = broadcast.
    * @param address Zero-based register starting address (0..0xFFFF).
    * @param length Number of registers to read (1..125).
-   * @param timeout Per-request timeout override (ms).
+   * @param responseTimeout Per-request response-timeout override (ms) - deadline
+   *   for the first response byte.
+   * @param totalTimeout Per-request total-timeout override (ms), or `Infinity`
+   *   for no cap on the full cycle; omit to inherit the instance default.
    * @returns Promise resolving to a `number[]` of 16-bit register values.
    * @throws Same as {@link readCoils}.
    */
-  public readInputRegisters(unit: 0, address: number, length: number, timeout?: number): Promise<void>;
-  public readInputRegisters(unit: number, address: number, length: number, timeout?: number): Promise<ModbusResponse<number[]>>;
+  public readInputRegisters(unit: 0, address: number, length: number, responseTimeout?: number, totalTimeout?: number): Promise<void>;
   public readInputRegisters(
     unit: number,
     address: number,
     length: number,
-    timeout = this.timeout,
+    responseTimeout?: number,
+    totalTimeout?: number,
+  ): Promise<ModbusResponse<number[]>>;
+  public readInputRegisters(
+    unit: number,
+    address: number,
+    length: number,
+    responseTimeout = this.responseTimeout,
+    totalTimeout = this.totalTimeout,
   ): Promise<ModbusResponse<number[]> | void> {
-    return this.writeFC3Or4(unit, FunctionCode.READ_INPUT_REGISTERS, address, length, timeout);
+    return this.writeFC3Or4(unit, FunctionCode.READ_INPUT_REGISTERS, address, length, responseTimeout, totalTimeout);
   }
 
   /** Alias for {@link writeSingleCoil}. */
@@ -1025,13 +1193,28 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @param address Zero-based coil address (0..0xFFFF).
    * @param value Coil state — `0` for OFF (`0x0000` on the wire) or `1` for
    *   ON (`0xFF00`).
-   * @param timeout Per-request timeout override (ms).
+   * @param responseTimeout Per-request response-timeout override (ms) - deadline
+   *   for the first response byte.
+   * @param totalTimeout Per-request total-timeout override (ms), or `Infinity`
+   *   for no cap on the full cycle; omit to inherit the instance default.
    * @returns Promise resolving to `{ data: value, ... }` echoed from the slave.
    * @throws Same as {@link readCoils}.
    */
-  public writeSingleCoil(unit: 0, address: number, value: 0 | 1, timeout?: number): Promise<void>;
-  public writeSingleCoil(unit: number, address: number, value: 0 | 1, timeout?: number): Promise<ModbusResponse<0 | 1>>;
-  public writeSingleCoil(unit: number, address: number, value: 0 | 1, timeout = this.timeout): Promise<ModbusResponse<0 | 1> | void> {
+  public writeSingleCoil(unit: 0, address: number, value: 0 | 1, responseTimeout?: number, totalTimeout?: number): Promise<void>;
+  public writeSingleCoil(
+    unit: number,
+    address: number,
+    value: 0 | 1,
+    responseTimeout?: number,
+    totalTimeout?: number,
+  ): Promise<ModbusResponse<0 | 1>>;
+  public writeSingleCoil(
+    unit: number,
+    address: number,
+    value: 0 | 1,
+    responseTimeout = this.responseTimeout,
+    totalTimeout = this.totalTimeout,
+  ): Promise<ModbusResponse<0 | 1> | void> {
     const fc = FunctionCode.WRITE_SINGLE_COIL;
 
     const bufferTx = Buffer.allocUnsafe(4);
@@ -1043,7 +1226,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     bufferTx[3] = coilValue & 0xff;
 
     return new Promise<ModbusResponse<0 | 1> | void>((resolve, reject) => {
-      this._send(unit, fc, bufferTx, timeout, unit === 0, (err, frame) => {
+      this._send(unit, fc, bufferTx, responseTimeout, totalTimeout, unit === 0, (err, frame) => {
         if (err) {
           reject(err);
           return;
@@ -1077,13 +1260,28 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @param unit Unit / slave address; `0` = broadcast.
    * @param address Zero-based register address (0..0xFFFF).
    * @param value Big-endian 16-bit value to write (0..0xFFFF).
-   * @param timeout Per-request timeout override (ms).
+   * @param responseTimeout Per-request response-timeout override (ms) - deadline
+   *   for the first response byte.
+   * @param totalTimeout Per-request total-timeout override (ms), or `Infinity`
+   *   for no cap on the full cycle; omit to inherit the instance default.
    * @returns Promise resolving to `{ data: value, ... }` echoed from the slave.
    * @throws Same as {@link readCoils}.
    */
-  public writeSingleRegister(unit: 0, address: number, value: number, timeout?: number): Promise<void>;
-  public writeSingleRegister(unit: number, address: number, value: number, timeout?: number): Promise<ModbusResponse<number>>;
-  public writeSingleRegister(unit: number, address: number, value: number, timeout = this.timeout): Promise<ModbusResponse<number> | void> {
+  public writeSingleRegister(unit: 0, address: number, value: number, responseTimeout?: number, totalTimeout?: number): Promise<void>;
+  public writeSingleRegister(
+    unit: number,
+    address: number,
+    value: number,
+    responseTimeout?: number,
+    totalTimeout?: number,
+  ): Promise<ModbusResponse<number>>;
+  public writeSingleRegister(
+    unit: number,
+    address: number,
+    value: number,
+    responseTimeout = this.responseTimeout,
+    totalTimeout = this.totalTimeout,
+  ): Promise<ModbusResponse<number> | void> {
     const fc = FunctionCode.WRITE_SINGLE_REGISTER;
 
     const bufferTx = Buffer.allocUnsafe(4);
@@ -1094,7 +1292,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     bufferTx[3] = value & 0xff;
 
     return new Promise<ModbusResponse<number> | void>((resolve, reject) => {
-      this._send(unit, fc, bufferTx, timeout, unit === 0, (err, frame) => {
+      this._send(unit, fc, bufferTx, responseTimeout, totalTimeout, unit === 0, (err, frame) => {
         if (err) {
           reject(err);
           return;
@@ -1128,15 +1326,28 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    *
    * @param unit Unit / slave address; `0` = broadcast.
    * @param data 16-bit diagnostic data value (0..0xFFFF) sent big-endian.
-   * @param timeout Per-request timeout override in milliseconds.
+   * @param responseTimeout Per-request response-timeout override in milliseconds
+   *   - deadline for the first response byte.
+   * @param totalTimeout Per-request total-timeout override in milliseconds, or
+   *   `Infinity` for no cap on the full cycle.
    * @returns Promise resolving to `{ data: number, ... }` where `data` is the
    *   echoed 16-bit value.
    * @throws Same as {@link readCoils}; `Error('Response echo does not match request')`
    *   when the echoed data does not match the request.
    */
-  public diagnosticsReturnQueryData(unit: 0, data: number, timeout?: number): Promise<void>;
-  public diagnosticsReturnQueryData(unit: number, data: number, timeout?: number): Promise<ModbusResponse<number>>;
-  public diagnosticsReturnQueryData(unit: number, data: number, timeout = this.timeout): Promise<ModbusResponse<number> | void> {
+  public diagnosticsReturnQueryData(unit: 0, data: number, responseTimeout?: number, totalTimeout?: number): Promise<void>;
+  public diagnosticsReturnQueryData(
+    unit: number,
+    data: number,
+    responseTimeout?: number,
+    totalTimeout?: number,
+  ): Promise<ModbusResponse<number>>;
+  public diagnosticsReturnQueryData(
+    unit: number,
+    data: number,
+    responseTimeout = this.responseTimeout,
+    totalTimeout = this.totalTimeout,
+  ): Promise<ModbusResponse<number> | void> {
     const fc = FunctionCode.DIAGNOSTICS;
 
     const bufferTx = Buffer.allocUnsafe(4);
@@ -1147,7 +1358,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     bufferTx[3] = data & 0xff;
 
     return new Promise<ModbusResponse<number> | void>((resolve, reject) => {
-      this._send(unit, fc, bufferTx, timeout, unit === 0, (err, frame) => {
+      this._send(unit, fc, bufferTx, responseTimeout, totalTimeout, unit === 0, (err, frame) => {
         if (err) {
           reject(err);
           return;
@@ -1186,23 +1397,34 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @param address Zero-based coil starting address (0..0xFFFF).
    * @param value Coil values to write — `ArrayLike<0 | 1>` where element `i`
    *   is `0` (OFF) or `1` (ON). Length must be 1..1968 per spec.
-   * @param timeout Per-request timeout override (ms).
+   * @param responseTimeout Per-request response-timeout override (ms) - deadline
+   *   for the first response byte.
+   * @param totalTimeout Per-request total-timeout override (ms), or `Infinity`
+   *   for no cap on the full cycle; omit to inherit the instance default.
    * @returns Promise resolving to `{ data: value, ... }` (the original input
    *   value, not the wire echo, for caller convenience).
    * @throws Same as {@link readCoils}.
    */
-  public writeMultipleCoils(unit: 0, address: number, value: ArrayLike<0 | 1>, timeout?: number): Promise<void>;
+  public writeMultipleCoils(
+    unit: 0,
+    address: number,
+    value: ArrayLike<0 | 1>,
+    responseTimeout?: number,
+    totalTimeout?: number,
+  ): Promise<void>;
   public writeMultipleCoils<T extends ArrayLike<0 | 1> = ArrayLike<0 | 1>>(
     unit: number,
     address: number,
     value: T,
-    timeout?: number,
+    responseTimeout?: number,
+    totalTimeout?: number,
   ): Promise<ModbusResponse<T>>;
   public writeMultipleCoils<T extends ArrayLike<0 | 1> = ArrayLike<0 | 1>>(
     unit: number,
     address: number,
     value: T,
-    timeout = this.timeout,
+    responseTimeout = this.responseTimeout,
+    totalTimeout = this.totalTimeout,
   ): Promise<ModbusResponse<T> | void> {
     const fc = FunctionCode.WRITE_MULTIPLE_COILS;
     const len = value.length;
@@ -1255,7 +1477,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     }
 
     return new Promise<ModbusResponse<T> | void>((resolve, reject) => {
-      this._send(unit, fc, bufferTx, timeout, unit === 0, (err, frame) => {
+      this._send(unit, fc, bufferTx, responseTimeout, totalTimeout, unit === 0, (err, frame) => {
         if (err) {
           reject(err);
           return;
@@ -1290,23 +1512,34 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @param address Zero-based register starting address (0..0xFFFF).
    * @param value Register values to write as an `ArrayLike<number>` (each
    *   element is a 16-bit word, 0..0xFFFF). Length must be 1..123 per spec.
-   * @param timeout Per-request timeout override (ms).
+   * @param responseTimeout Per-request response-timeout override (ms) - deadline
+   *   for the first response byte.
+   * @param totalTimeout Per-request total-timeout override (ms), or `Infinity`
+   *   for no cap on the full cycle; omit to inherit the instance default.
    * @returns Promise resolving to `{ data: value, ... }` (the original input
    *   value; the wire echo is just the address+quantity tuple).
    * @throws Same as {@link readCoils}.
    */
-  public writeMultipleRegisters(unit: 0, address: number, value: ArrayLike<number>, timeout?: number): Promise<void>;
+  public writeMultipleRegisters(
+    unit: 0,
+    address: number,
+    value: ArrayLike<number>,
+    responseTimeout?: number,
+    totalTimeout?: number,
+  ): Promise<void>;
   public writeMultipleRegisters<T extends ArrayLike<number> = ArrayLike<number>>(
     unit: number,
     address: number,
     value: T,
-    timeout?: number,
+    responseTimeout?: number,
+    totalTimeout?: number,
   ): Promise<ModbusResponse<T>>;
   public writeMultipleRegisters<T extends ArrayLike<number> = ArrayLike<number>>(
     unit: number,
     address: number,
     value: T,
-    timeout = this.timeout,
+    responseTimeout = this.responseTimeout,
+    totalTimeout = this.totalTimeout,
   ): Promise<ModbusResponse<T> | void> {
     const fc = FunctionCode.WRITE_MULTIPLE_REGISTERS;
     const byteCount = value.length * 2;
@@ -1327,7 +1560,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     }
 
     return new Promise<ModbusResponse<T> | void>((resolve, reject) => {
-      this._send(unit, fc, bufferTx, timeout, unit === 0, (err, frame) => {
+      this._send(unit, fc, bufferTx, responseTimeout, totalTimeout, unit === 0, (err, frame) => {
         if (err) {
           reject(err);
           return;
@@ -1363,20 +1596,33 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    *   `serverId`. Defaults to `1`. The remaining bytes are surfaced as
    *   `additionalData` so legacy multi-byte server IDs can be parsed
    *   without losing the trailing payload.
-   * @param timeout Per-request timeout override (ms).
+   * @param responseTimeout Per-request response-timeout override (ms) - deadline
+   *   for the first response byte.
+   * @param totalTimeout Per-request total-timeout override (ms), or `Infinity`
+   *   for no cap on the full cycle; omit to inherit the instance default.
    * @returns Promise resolving to `{ data: ServerId, ... }`.
    * @throws Same as {@link readCoils}; `Error('Report server ID response too short')`
    *   when the response is too short to contain `serverIdLength` bytes;
    *   `Error('Report server ID length mismatch')` when the embedded byte-count
    *   disagrees with the actual response length.
    */
-  public reportServerId(unit: 0, serverIdLength?: number, timeout?: number): Promise<void>;
-  public reportServerId(unit: number, serverIdLength?: number, timeout?: number): Promise<ModbusResponse<ServerId>>;
-  public reportServerId(unit: number, serverIdLength = 1, timeout = this.timeout): Promise<ModbusResponse<ServerId> | void> {
+  public reportServerId(unit: 0, serverIdLength?: number, responseTimeout?: number, totalTimeout?: number): Promise<void>;
+  public reportServerId(
+    unit: number,
+    serverIdLength?: number,
+    responseTimeout?: number,
+    totalTimeout?: number,
+  ): Promise<ModbusResponse<ServerId>>;
+  public reportServerId(
+    unit: number,
+    serverIdLength = 1,
+    responseTimeout = this.responseTimeout,
+    totalTimeout = this.totalTimeout,
+  ): Promise<ModbusResponse<ServerId> | void> {
     const fc = FunctionCode.REPORT_SERVER_ID;
 
     return new Promise<ModbusResponse<ServerId> | void>((resolve, reject) => {
-      this._send(unit, fc, EMPTY_BUFFER, timeout, unit === 0, (err, frame) => {
+      this._send(unit, fc, EMPTY_BUFFER, responseTimeout, totalTimeout, unit === 0, (err, frame) => {
         if (err) {
           reject(err);
           return;
@@ -1422,25 +1668,37 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @param address Zero-based register address (0..0xFFFF).
    * @param andMask 16-bit AND mask (0..0xFFFF).
    * @param orMask 16-bit OR mask (0..0xFFFF).
-   * @param timeout Per-request timeout override (ms).
+   * @param responseTimeout Per-request response-timeout override (ms) - deadline
+   *   for the first response byte.
+   * @param totalTimeout Per-request total-timeout override (ms), or `Infinity`
+   *   for no cap on the full cycle; omit to inherit the instance default.
    * @returns Promise resolving to `{ data: { andMask, orMask }, ... }`
    *   echoed from the slave.
    * @throws Same as {@link readCoils}.
    */
-  public maskWriteRegister(unit: 0, address: number, andMask: number, orMask: number, timeout?: number): Promise<void>;
+  public maskWriteRegister(
+    unit: 0,
+    address: number,
+    andMask: number,
+    orMask: number,
+    responseTimeout?: number,
+    totalTimeout?: number,
+  ): Promise<void>;
   public maskWriteRegister(
     unit: number,
     address: number,
     andMask: number,
     orMask: number,
-    timeout?: number,
+    responseTimeout?: number,
+    totalTimeout?: number,
   ): Promise<ModbusResponse<{ andMask: number; orMask: number }>>;
   public maskWriteRegister(
     unit: number,
     address: number,
     andMask: number,
     orMask: number,
-    timeout = this.timeout,
+    responseTimeout = this.responseTimeout,
+    totalTimeout = this.totalTimeout,
   ): Promise<ModbusResponse<{ andMask: number; orMask: number }> | void> {
     const fc = FunctionCode.MASK_WRITE_REGISTER;
 
@@ -1454,7 +1712,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     bufferTx[5] = orMask & 0xff;
 
     return new Promise<ModbusResponse<{ andMask: number; orMask: number }> | void>((resolve, reject) => {
-      this._send(unit, fc, bufferTx, timeout, unit === 0, (err, frame) => {
+      this._send(unit, fc, bufferTx, responseTimeout, totalTimeout, unit === 0, (err, frame) => {
         if (err) {
           reject(err);
           return;
@@ -1489,7 +1747,10 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @param read Read window: `{ address, length }` (length 1..125).
    * @param write Write window: `{ address, value }` where `value` is an
    *   `ArrayLike<number>` of 1..121 registers.
-   * @param timeout Per-request timeout override (ms).
+   * @param responseTimeout Per-request response-timeout override (ms) - deadline
+   *   for the first response byte.
+   * @param totalTimeout Per-request total-timeout override (ms), or `Infinity`
+   *   for no cap on the full cycle; omit to inherit the instance default.
    * @returns Promise resolving to `{ data: number[], ... }` containing the
    *   read window values **after** the write has been applied.
    * @throws Same as {@link readCoils}.
@@ -1498,19 +1759,22 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     unit: 0,
     read: { address: number; length: number },
     write: { address: number; value: ArrayLike<number> },
-    timeout?: number,
+    responseTimeout?: number,
+    totalTimeout?: number,
   ): Promise<void>;
   public readAndWriteMultipleRegisters<T extends ArrayLike<number> = ArrayLike<number>>(
     unit: number,
     read: { address: number; length: number },
     write: { address: number; value: T },
-    timeout?: number,
+    responseTimeout?: number,
+    totalTimeout?: number,
   ): Promise<ModbusResponse<number[]>>;
   public readAndWriteMultipleRegisters<T extends ArrayLike<number> = ArrayLike<number>>(
     unit: number,
     read: { address: number; length: number },
     write: { address: number; value: T },
-    timeout = this.timeout,
+    responseTimeout = this.responseTimeout,
+    totalTimeout = this.totalTimeout,
   ): Promise<ModbusResponse<number[]> | void> {
     const fc = FunctionCode.READ_WRITE_MULTIPLE_REGISTERS;
     const byteCount = write.value.length * 2;
@@ -1536,7 +1800,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     }
 
     return new Promise<ModbusResponse<number[]> | void>((resolve, reject) => {
-      this._send(unit, fc, bufferTx, timeout, unit === 0, (err, frame) => {
+      this._send(unit, fc, bufferTx, responseTimeout, totalTimeout, unit === 0, (err, frame) => {
         if (err) {
           reject(err);
           return;
@@ -1584,7 +1848,10 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    *   extended; `4` for individual access — see `ReadDeviceIDCode`.
    * @param objectId Starting object id (0..0xFF). For streaming
    *   reads, the slave returns objects starting from this id.
-   * @param timeout Per-request timeout override (ms).
+   * @param responseTimeout Per-request response-timeout override (ms) - deadline
+   *   for the first response byte.
+   * @param totalTimeout Per-request total-timeout override (ms), or `Infinity`
+   *   for no cap on the full cycle; omit to inherit the instance default.
    * @returns Promise resolving to `{ data: DeviceIdentification, ... }`.
    * @throws Same as {@link readCoils}; `Error('Read device identification response too short')`
    *   when the response is below the 6-byte MEI header; `Error('Invalid read device identification response')`
@@ -1593,94 +1860,110 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    *   `Error('Device identification length mismatch')` when the total length
    *   does not match the cumulative TLV body length.
    */
-  public readDeviceIdentification(unit: 0, readDeviceIDCode: number, objectId: number, timeout?: number): Promise<void>;
+  public readDeviceIdentification(
+    unit: 0,
+    readDeviceIDCode: number,
+    objectId: number,
+    responseTimeout?: number,
+    totalTimeout?: number,
+  ): Promise<void>;
   public readDeviceIdentification(
     unit: number,
     readDeviceIDCode: number,
     objectId: number,
-    timeout?: number,
+    responseTimeout?: number,
+    totalTimeout?: number,
   ): Promise<ModbusResponse<DeviceIdentification>>;
   public readDeviceIdentification(
     unit: number,
     readDeviceIDCode: number,
     objectId: number,
-    timeout = this.timeout,
+    responseTimeout = this.responseTimeout,
+    totalTimeout = this.totalTimeout,
   ): Promise<ModbusResponse<DeviceIdentification> | void> {
     const fc = FunctionCode.READ_DEVICE_IDENTIFICATION;
 
     return new Promise<ModbusResponse<DeviceIdentification> | void>((resolve, reject) => {
-      this._send(unit, fc, Buffer.from([MEI_READ_DEVICE_ID, readDeviceIDCode, objectId]), timeout, unit === 0, (err, frame) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-        if (!frame) {
-          resolve(undefined);
-          return;
-        }
-        const exception = detectException(frame, unit, fc);
-        if (exception) {
-          reject(exception);
-          return;
-        }
-        try {
-          validateResponse(frame, unit, fc);
-          if (frame.data.length < 6) {
-            throw new Error('Read device identification response too short');
+      this._send(
+        unit,
+        fc,
+        Buffer.from([MEI_READ_DEVICE_ID, readDeviceIDCode, objectId]),
+        responseTimeout,
+        totalTimeout,
+        unit === 0,
+        (err, frame) => {
+          if (err) {
+            reject(err);
+            return;
           }
-          if (frame.data[0] !== MEI_READ_DEVICE_ID || frame.data[1] !== readDeviceIDCode) {
-            throw new Error('Invalid read device identification response');
+          if (!frame) {
+            resolve(undefined);
+            return;
           }
-
-          const objects: { id: number; value: string }[] = [];
-          let object: [number?, number?, number[]?] = [];
-          let totalBytes = 0;
-          for (const v of frame.data.subarray(6)) {
-            switch (object.length) {
-              case 0:
-              case 1: {
-                object.push(v);
-                break;
-              }
-
-              case 2: {
-                object.push([v]);
-                break;
-              }
-
-              case 3: {
-                object[2]!.push(v);
-                if (object[1] === object[2]!.length) {
-                  objects.push({ id: object[0]!, value: Buffer.from(object[2]!).toString() });
-                  totalBytes += 2 + object[1];
-                  object = [];
-                }
-                break;
-              }
-
-              default:
-                break;
+          const exception = detectException(frame, unit, fc);
+          if (exception) {
+            reject(exception);
+            return;
+          }
+          try {
+            validateResponse(frame, unit, fc);
+            if (frame.data.length < 6) {
+              throw new Error('Read device identification response too short');
             }
-          }
-          if (objects.length !== frame.data[5]) {
-            throw new Error('Device identification object count mismatch');
-          }
-          if (frame.data.length !== 6 + totalBytes) {
-            throw new Error('Device identification length mismatch');
-          }
+            if (frame.data[0] !== MEI_READ_DEVICE_ID || frame.data[1] !== readDeviceIDCode) {
+              throw new Error('Invalid read device identification response');
+            }
 
-          (frame as { data: unknown }).data = {
-            readDeviceIDCode,
-            conformityLevel: frame.data[2],
-            moreFollows: frame.data[3] === 0xff,
-            nextObjectId: frame.data[4],
-            objects,
-          };
-          resolve(frame as unknown as ModbusResponse<DeviceIdentification>);
-        } catch (e) {
-          reject(e);
-        }
-      });
+            const objects: { id: number; value: string }[] = [];
+            let object: [number?, number?, number[]?] = [];
+            let totalBytes = 0;
+            for (const v of frame.data.subarray(6)) {
+              switch (object.length) {
+                case 0:
+                case 1: {
+                  object.push(v);
+                  break;
+                }
+
+                case 2: {
+                  object.push([v]);
+                  break;
+                }
+
+                case 3: {
+                  object[2]!.push(v);
+                  if (object[1] === object[2]!.length) {
+                    objects.push({ id: object[0]!, value: Buffer.from(object[2]!).toString() });
+                    totalBytes += 2 + object[1];
+                    object = [];
+                  }
+                  break;
+                }
+
+                default:
+                  break;
+              }
+            }
+            if (objects.length !== frame.data[5]) {
+              throw new Error('Device identification object count mismatch');
+            }
+            if (frame.data.length !== 6 + totalBytes) {
+              throw new Error('Device identification length mismatch');
+            }
+
+            (frame as { data: unknown }).data = {
+              readDeviceIDCode,
+              conformityLevel: frame.data[2],
+              moreFollows: frame.data[3] === 0xff,
+              nextObjectId: frame.data[4],
+              objects,
+            };
+            resolve(frame as unknown as ModbusResponse<DeviceIdentification>);
+          } catch (e) {
+            reject(e);
+          }
+        },
+      );
     });
   }
 
@@ -1696,15 +1979,25 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @param data Request PDU payload (bytes after FC, before checksum).
    *   Accepts a `Buffer` for arbitrary bytes, or a `number[]` for a
    *   word-oriented payload that will be encoded big-endian.
-   * @param timeout Per-request timeout override (ms).
+   * @param responseTimeout Per-request response-timeout override (ms) - deadline
+   *   for the first response byte.
+   * @param totalTimeout Per-request total-timeout override (ms), or `Infinity`
+   *   for no cap on the full cycle; omit to inherit the instance default.
    * @returns Promise resolving to the raw response PDU `Buffer` (no FC,
    *   no checksum) — caller is responsible for parsing the body.
-   * @throws `Error('Request timed out')` when no response arrives within `timeout`;
-   *   typed {@link ModbusError} when the slave returns an exception response.
+   * @throws `Error('Request timed out')` when no response arrives within `responseTimeout`
+   *   (or the full cycle exceeds `totalTimeout` when set); typed {@link ModbusError} when
+   *   the slave returns an exception response.
    */
-  public sendCustomFC(unit: 0, fc: number, data: Buffer | number[], timeout?: number): Promise<void>;
-  public sendCustomFC(unit: number, fc: number, data: Buffer | number[], timeout?: number): Promise<Buffer>;
-  public sendCustomFC(unit: number, fc: number, data: Buffer | number[], timeout = this.timeout): Promise<Buffer | void> {
+  public sendCustomFC(unit: 0, fc: number, data: Buffer | number[], responseTimeout?: number, totalTimeout?: number): Promise<void>;
+  public sendCustomFC(unit: number, fc: number, data: Buffer | number[], responseTimeout?: number, totalTimeout?: number): Promise<Buffer>;
+  public sendCustomFC(
+    unit: number,
+    fc: number,
+    data: Buffer | number[],
+    responseTimeout = this.responseTimeout,
+    totalTimeout = this.totalTimeout,
+  ): Promise<Buffer | void> {
     let payload: Buffer;
     if (Buffer.isBuffer(data)) {
       payload = data;
@@ -1720,7 +2013,7 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     }
 
     return new Promise<Buffer | void>((resolve, reject) => {
-      this._send(unit, fc, payload, timeout, unit === 0, (err, frame) => {
+      this._send(unit, fc, payload, responseTimeout, totalTimeout, unit === 0, (err, frame) => {
         if (err) {
           reject(err);
           return;
@@ -1845,7 +2138,8 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     this._queueUnits.length = 0;
     this._queueFcs.length = 0;
     this._queueDatas.length = 0;
-    this._queueTimeouts.length = 0;
+    this._queueResponseTimeouts.length = 0;
+    this._queueTotalTimeouts.length = 0;
     this._queueBroadcasts.length = 0;
     this._queueCallbacks.length = 0;
     this._queueFingerprints.length = 0;

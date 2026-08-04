@@ -24,10 +24,10 @@ import { MockPipelineAdapter } from '#test/helpers/mock-pipeline-adapter';
 import { flushPromises } from '#test/helpers/utils';
 
 describe('ModbusMaster', () => {
-  function createMaster(timeout = 100, queueStrategy?: ModbusQueueStrategy) {
+  function createMaster(responseTimeout = 100, queueStrategy?: ModbusQueueStrategy) {
     const adapter = new MockPipelineAdapter();
     const master = new ModbusMaster({
-      timeout,
+      responseTimeout,
       queueStrategy,
       pipelineAdapter: adapter,
       protocol: { type: 'TCP' },
@@ -138,7 +138,7 @@ describe('ModbusMaster', () => {
   it('should use the configured initial TCP transaction id', async () => {
     const adapter = new MockPipelineAdapter();
     const master = new ModbusMaster({
-      timeout: 100,
+      responseTimeout: 100,
       pipelineAdapter: adapter,
       protocol: { type: 'TCP', opts: { transactionId: 0x1234 } },
     });
@@ -381,6 +381,131 @@ describe('ModbusMaster', () => {
     const { master } = createMaster(20);
 
     await expect(master.readHoldingRegisters(1, 0, 1)).rejects.toThrow('Request timed out');
+  });
+
+  // ============================================================================
+  // responseTimeout / totalTimeout split
+  // ============================================================================
+
+  describe('responseTimeout and totalTimeout', () => {
+    it('should default responseTimeout to 1000 and totalTimeout to Infinity', () => {
+      const adapter = new MockPipelineAdapter();
+      const master = new ModbusMaster({
+        pipelineAdapter: adapter,
+        protocol: { type: 'TCP' },
+      });
+
+      expect(master.responseTimeout).toBe(1000);
+      expect(master.totalTimeout).toBe(Infinity);
+    });
+
+    it('should expose the configured values as readonly fields', () => {
+      const adapter = new MockPipelineAdapter();
+      const master = new ModbusMaster({
+        responseTimeout: 250,
+        totalTimeout: 2000,
+        pipelineAdapter: adapter,
+        protocol: { type: 'TCP' },
+      });
+
+      expect(master.responseTimeout).toBe(250);
+      expect(master.totalTimeout).toBe(2000);
+    });
+
+    it('should not reject past responseTimeout once the first response bytes have arrived', async () => {
+      const { master, adapter } = createMaster(50);
+
+      const promise = master.readHoldingRegisters(1, 0, 1);
+      const tid = adapter.written[0].readUInt16BE(0);
+      const frame = tcpFrame(tid, 1, 0x03, pduReadRegistersResponse([0x1234]));
+
+      // First chunk: the validated MBAP header + unit byte, but not the whole
+      // frame — the framing layer marks the request as responded.
+      adapter.emitData(frame.subarray(0, 7));
+
+      // Let the first-byte deadline lapse; the exchange must survive because
+      // the slave already started answering.
+      await new Promise((resolve) => setTimeout(resolve, 120));
+
+      adapter.emitData(frame.subarray(7));
+      const result = await promise;
+      expect(result!.data).toEqual([0x1234]);
+    });
+
+    it('should reject via totalTimeout when the response starts but stalls', async () => {
+      const adapter = new MockPipelineAdapter();
+      const master = new ModbusMaster({
+        responseTimeout: 40,
+        totalTimeout: 100,
+        pipelineAdapter: adapter,
+        protocol: { type: 'TCP' },
+      });
+
+      const promise = master.readHoldingRegisters(1, 0, 1);
+      const tid = adapter.written[0].readUInt16BE(0);
+      const frame = tcpFrame(tid, 1, 0x03, pduReadRegistersResponse([0x1234]));
+
+      // The response starts (first-byte timer is disarmed) but never completes;
+      // the total deadline is the backstop.
+      adapter.emitData(frame.subarray(0, 7));
+
+      await expect(promise).rejects.toThrow('Request timed out');
+    });
+
+    it('should attribute response-start per transaction id in concurrent mode', async () => {
+      const { master, adapter } = createMaster(50, 'concurrent');
+
+      const p1 = master.readHoldingRegisters(1, 0, 1);
+      const p2 = master.readHoldingRegisters(1, 1, 1);
+
+      expect(adapter.written).toHaveLength(2);
+      const tid1 = adapter.written[0].readUInt16BE(0);
+
+      // Only request 1's response starts arriving; request 2 stays unanswered.
+      const frame1 = tcpFrame(tid1, 1, 0x03, pduReadRegistersResponse([0x1111]));
+      adapter.emitData(frame1.subarray(0, 7));
+
+      // Request 2's first-byte deadline fires on its own — request 1's partial
+      // response must not disarm it.
+      await expect(p2).rejects.toThrow('Request timed out');
+
+      // Request 1 survives past the same deadline and completes normally.
+      adapter.emitData(frame1.subarray(7));
+      const r1 = await p1;
+      expect(r1!.data).toEqual([0x1111]);
+    });
+
+    it('should apply a per-call responseTimeout override', async () => {
+      const { master } = createMaster(10_000);
+
+      await expect(master.readHoldingRegisters(1, 0, 1, 20)).rejects.toThrow('Request timed out');
+    });
+
+    it('should apply a per-call totalTimeout override to a stalled response', async () => {
+      const { master, adapter } = createMaster(10_000);
+
+      const promise = master.readHoldingRegisters(1, 0, 1, Infinity, 80);
+      const tid = adapter.written[0].readUInt16BE(0);
+      const frame = tcpFrame(tid, 1, 0x03, pduReadRegistersResponse([0x1234]));
+
+      adapter.emitData(frame.subarray(0, 7));
+
+      await expect(promise).rejects.toThrow('Request timed out');
+    });
+
+    it('should resolve a broadcast write immediately when totalTimeout is set', async () => {
+      const adapter = new MockPipelineAdapter();
+      const master = new ModbusMaster({
+        responseTimeout: 10_000,
+        totalTimeout: 50,
+        pipelineAdapter: adapter,
+        protocol: { type: 'TCP' },
+      });
+
+      const result = await master.writeSingleRegister(0, 10, 0xabcd);
+      expect(result).toBeUndefined();
+      expect(adapter.written[0][6]).toBe(0);
+    });
   });
 
   it('should resolve undefined for a broadcast request', async () => {
@@ -1348,7 +1473,7 @@ describe('ModbusMaster', () => {
       };
 
       const master = new ModbusMaster({
-        timeout: 100,
+        responseTimeout: 100,
         pipelineAdapter: adapter,
         protocol: { type: 'TCP' },
       });
@@ -1364,7 +1489,7 @@ describe('ModbusMaster', () => {
       };
 
       const master = new ModbusMaster({
-        timeout: 100,
+        responseTimeout: 100,
         pipelineAdapter: adapter,
         protocol: { type: 'TCP' },
       });

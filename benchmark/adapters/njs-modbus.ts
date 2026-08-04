@@ -284,7 +284,7 @@ export class NjsModbusAdapter implements LibraryAdapter {
       pipelineAdapter: pipeline,
       protocol: { type: 'TCP' },
       queueStrategy: options?.queueStrategy ?? 'fifo',
-      timeout: options?.timeout ?? DEFAULT_TIMEOUT,
+      responseTimeout: options?.timeout ?? DEFAULT_TIMEOUT,
     });
 
     return new NjsClientHandle(master, physicalLayer);
@@ -328,7 +328,7 @@ export class NjsModbusAdapter implements LibraryAdapter {
       pipelineAdapter: pipeline,
       protocol: { type: protocol },
       queueStrategy: options?.queueStrategy ?? 'fifo',
-      timeout: options?.timeout ?? DEFAULT_TIMEOUT,
+      responseTimeout: options?.timeout ?? DEFAULT_TIMEOUT,
     });
 
     return new NjsClientHandle(master, physicalLayer);

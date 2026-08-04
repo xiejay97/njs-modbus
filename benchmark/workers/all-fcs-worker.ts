@@ -207,7 +207,7 @@ function createNjsModbusMaster(): Promise<{ master: ModbusMaster<'TCP'>; physica
       pipelineAdapter: pipeline,
       protocol: { type: 'TCP' },
       queueStrategy: 'fifo',
-      timeout: 1000,
+      responseTimeout: 1000,
     });
     return { master, physicalLayer };
   });

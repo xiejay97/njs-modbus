@@ -30,7 +30,7 @@ layer.once('connect', (pipeline) => {
   const master = new ModbusMaster({
     pipelineAdapter: pipeline,
     protocol: { type: 'TCP' },
-    timeout: 5000,
+    responseTimeout: 5000,
   });
 
   master.on('frameError', (event) => {

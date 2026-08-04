@@ -117,7 +117,7 @@ physical.on('connect', async (pipeline) => {
     pipelineAdapter: pipeline,
     protocol: { type: 'TCP' },
     queueStrategy: 'concurrent',
-    timeout: 1000,
+    responseTimeout: 1000,
   });
 
   try {
@@ -186,7 +186,7 @@ physical.on('connect', async (pipeline) => {
     pipelineAdapter: pipeline,
     protocol: { type: 'RTU' },
     queueStrategy: 'fifo',
-    timeout: 500,
+    responseTimeout: 500,
   });
 
   const res = await master.readHoldingRegisters(1, 0, 10);

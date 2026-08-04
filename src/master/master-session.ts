@@ -28,6 +28,18 @@ import type { ModbusFrame } from '../types';
 type Callback = (error: Error | null, frame?: ModbusFrame) => void;
 
 /**
+ * A registered waiter plus its optional first-bytes hook. The hook is fired
+ * via {@link MasterSession.notifyResponded} and lives and dies with the
+ * waiter, so no separate reverse index is needed for first-byte attribution.
+ *
+ * @internal
+ */
+interface Waiter {
+  callback: Callback;
+  onResponded?: () => void;
+}
+
+/**
  * Sentinel session key used by RTU and ASCII masters where there is no
  * MBAP transaction id to disambiguate concurrent requests.
  *
@@ -48,7 +60,7 @@ export const FIFO_KEY = 'fifo' as const;
  * native `setTimeout` covers the entire fleet of in-flight exchanges.
  */
 export class MasterSession {
-  private _waiters = new Map<string | number, Callback>();
+  private _waiters = new Map<string | number, Waiter>();
 
   /**
    * Register a waiter for `key`.
@@ -58,10 +70,13 @@ export class MasterSession {
    * @param key Session key — TCP transaction id or {@link FIFO_KEY}.
    * @param callback Node-style callback invoked exactly once by
    *   {@link handleFrame} or {@link stopAll}.
+   * @param onResponded Optional hook fired by {@link notifyResponded} when the
+   *   first bytes of the matching response are observed; dropped together with
+   *   the waiter.
    * @returns `void`.
    */
-  start(key: string | number, callback: Callback): void {
-    this._waiters.set(key, callback);
+  start(key: string | number, callback: Callback, onResponded?: () => void): void {
+    this._waiters.set(key, { callback, onResponded });
   }
 
   /**
@@ -90,7 +105,7 @@ export class MasterSession {
     const waiters = [...this._waiters.values()];
     this._waiters.clear();
     for (const waiter of waiters) {
-      waiter(error);
+      waiter.callback(error);
     }
   }
 
@@ -102,6 +117,23 @@ export class MasterSession {
    */
   has(key: string | number): boolean {
     return this._waiters.has(key);
+  }
+
+  /**
+   * Signal that the first bytes of the response for `key` have been observed.
+   *
+   * Fires the waiter's `onResponded` hook, if any. Unknown keys (late response
+   * after settle, unsolicited traffic, bus noise with nothing in flight) are
+   * silently ignored.
+   *
+   * @param key Session key — TCP transaction id or {@link FIFO_KEY}.
+   * @returns `void`.
+   */
+  notifyResponded(key: string | number): void {
+    const waiter = this._waiters.get(key);
+    if (waiter && waiter.onResponded) {
+      waiter.onResponded();
+    }
   }
 
   /**
@@ -122,7 +154,7 @@ export class MasterSession {
       return;
     }
     this._waiters.delete(key);
-    waiter(null, frame);
+    waiter.callback(null, frame);
   }
 
   /**
