@@ -227,8 +227,8 @@ export function generateAduHashFingerprint(buffer: Buffer | null, n1?: number, n
  *
  * Used by `queueStrategy: 'deduplicate'` to detect requests that are byte-
  * equivalent at the protocol level — same unit, same FC, same address
- * window, same write payload — so the queue can collapse stale duplicates
- * (and merge containing read intervals) without re-issuing them on the wire.
+ * window, same write payload — so the queue can drop stale exact duplicates
+ * instead of re-issuing them on the wire.
  *
  * The function inspects only the parts of `data` that carry semantic identity
  * for each FC family — for FC 17 (no parameters) only `unit + fc` are mixed,

@@ -63,9 +63,12 @@ for (const codeStr of Object.keys(ERROR_MESSAGES)) {
 /**
  * Strongly-typed `Error` subclass that carries a Modbus exception code.
  *
- * Throwing this from a slave handler causes the slave dispatcher to encode
- * the exception response (FC | 0x80 followed by `code`); throwing it from a
- * master callback path surfaces the slave's reported exception to user code.
+ * On the master, a request callback receives a `ModbusError` when the slave
+ * answers with an exception response (FC | 0x80 followed by `code`), or when
+ * an access-authorizer gate denies the request with a numeric {@link ErrorCode}.
+ * Slave unit handlers never throw this type — they report failures to the
+ * dispatcher as a plain {@link ErrorCode} through their result callback, and
+ * the dispatcher encodes the exception response from that number.
  *
  * The `name` property is fixed to `'ModbusError'` so {@link getCodeByError}
  * can reliably identify it across realm / V8 isolate boundaries without
@@ -115,7 +118,10 @@ export function getErrorCodeByMessage(message: string): ErrorCode | undefined {
 
 /**
  * Map an arbitrary `Error` back to a Modbus exception code for transport on
- * the wire. Used by the slave dispatch path when a user handler throws.
+ * the wire. Not called by the built-in dispatch paths — slave unit handlers
+ * report plain {@link ErrorCode} values via callback — so this is a standalone
+ * utility for userland gateways / proxies / middleware that hold an `Error`
+ * and need the closest wire-encodable code.
  *
  * Recognises `ModbusError` instances by `name === 'ModbusError'` and a valid
  * `code`. If the code is missing or invalid, or if the error has been rebuilt

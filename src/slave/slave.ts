@@ -88,7 +88,7 @@ export interface ModbusSlaveOptions<P extends 'TCP' | 'RTU' | 'ASCII'> {
   queueStrategy?: P extends 'TCP' ? ModbusQueueStrategy : Exclude<ModbusQueueStrategy, 'concurrent'>;
   /**
    * When `queueStrategy` is `'concurrent'`, serialize concurrent write
-   * requests (FC05/06/15/16) whose address ranges overlap on the same unit.
+   * requests (FC05/06/15/16/22/23) whose address ranges overlap on the same unit.
    * Set to `false` for purely synchronous in-memory slaves that do not need
    * the coordination overhead.
    * @default true
@@ -179,8 +179,12 @@ export class ModbusSlave<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEvent
    * @param options Construction options; `protocol` is mandatory,
    *   `queueStrategy` defaults to `'drop-stale'`, and `enableWriteRangeLock`
    *   defaults to `true`.
-   * @throws `Error('Concurrent mode requires a Modbus TCP protocol layer')`
-   *   when `queueStrategy: 'concurrent'` is paired with a non-TCP protocol.
+   *
+   *   `queueStrategy: 'concurrent'` is restricted to TCP at the type level
+   *   only; there is no runtime guard. Pairing it with a non-TCP protocol by
+   *   bypassing the type system is unsupported — RTU/ASCII have no
+   *   transaction id, so concurrent dispatch would interleave frames on the
+   *   wire.
    */
   constructor(options: ModbusSlaveOptions<P>) {
     super();
@@ -2044,8 +2048,9 @@ export class ModbusSlave<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEvent
    * @param unit Unit / slave address to remove.
    * @returns `this` for chaining.
    */
-  public removeUnit(unit: number): void {
+  public removeUnit(unit: number): this {
     this._units.delete(unit);
+    return this;
   }
 
   /**
@@ -2053,8 +2058,9 @@ export class ModbusSlave<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEvent
    *
    * @returns `this` for chaining.
    */
-  public removeAllUnits(): void {
+  public removeAllUnits(): this {
     this._units.clear();
+    return this;
   }
 
   /**
@@ -2072,9 +2078,10 @@ export class ModbusSlave<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEvent
       ? CustomFunctionCode & { determineFrameLength: (getByte: (idx: number) => number, length: number) => number }
       : CustomFunctionCode,
     response: (unit: number, fc: number, data: Buffer, callback: CallbackLazy<Buffer>) => void,
-  ): void {
+  ): this {
     this._protocolLayer.addCustomFunctionCode(cfc);
     this._cfcResponses.set(cfc.fc, response);
+    return this;
   }
 
   /**
@@ -2083,9 +2090,10 @@ export class ModbusSlave<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEvent
    * @param fc Function code byte to remove.
    * @returns `this` for chaining.
    */
-  public removeCustomFunctionCode(fc: number): void {
+  public removeCustomFunctionCode(fc: number): this {
     this._protocolLayer.customFunctionCodes[fc] = undefined;
     this._cfcResponses.delete(fc);
+    return this;
   }
 
   /**
@@ -2093,9 +2101,10 @@ export class ModbusSlave<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEvent
    *
    * @returns `this` for chaining.
    */
-  public removeAllCustomFunctionCodes(): void {
+  public removeAllCustomFunctionCodes(): this {
     this._protocolLayer.customFunctionCodes.fill(undefined);
     this._cfcResponses.clear();
+    return this;
   }
 
   /**
@@ -2118,8 +2127,9 @@ export class ModbusSlave<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEvent
    * });
    * ```
    */
-  public setAccessAuthorizer(authorizer: AccessAuthorizer) {
+  public setAccessAuthorizer(authorizer: AccessAuthorizer): this {
     this._accessAuthorizer = authorizer;
+    return this;
   }
 
   /**
@@ -2130,8 +2140,9 @@ export class ModbusSlave<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEvent
    *
    * @returns `this` for chaining.
    */
-  public deleteAccessAuthorizer() {
+  public deleteAccessAuthorizer(): this {
     this._accessAuthorizer = undefined;
+    return this;
   }
 
   /**
@@ -2140,8 +2151,6 @@ export class ModbusSlave<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEvent
    * After this call the instance is unusable: protocol callbacks are cleaned,
    * queues are cleared, units and custom function codes are removed, and
    * listeners are detached.
-   *
-   * @returns `this` for chaining.
    */
   public destroy(): void {
     if (this._destroyed) {

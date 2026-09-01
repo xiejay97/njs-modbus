@@ -48,9 +48,8 @@ export interface ModbusMasterEvents {
  * ASCII); each protocol accepts an optional `opts` bag (RTU/ASCII framing
  * options, or `{ transactionId }` for TCP to seed the 16-bit MBAP transaction
  * counter); `queueStrategy`, `responseTimeout`, and `totalTimeout` tune the
- * request scheduler; and an optional `customFunctionCodes` array can be seeded at
- * construction time so the master recognises non-standard function codes
- * immediately.
+ * request scheduler. Non-standard function codes are registered after
+ * construction via {@link ModbusMaster#addCustomFunctionCode}.
  *
  * @template P Transport protocol literal — `'TCP'`, `'RTU'`, or `'ASCII'`.
  */
@@ -309,13 +308,15 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @param options Construction options; `protocol` is mandatory,
    *   `queueStrategy` defaults to `'drop-stale'`, `responseTimeout`
    *   defaults to 1000 ms, and `totalTimeout` defaults to `Infinity` (no cap).
-   *   An optional `customFunctionCodes` array can be supplied to pre-register
-   *   non-standard function codes.
+   *   Non-standard function codes are registered after construction via
+   *   {@link addCustomFunctionCode}.
    * @returns A new {@link ModbusMaster} instance.
-   * @throws `Error('Concurrent mode requires a Modbus TCP protocol layer')`
-   *   when `queueStrategy: 'concurrent'` is paired with a non-TCP protocol —
-   *   RTU/ASCII have no transaction id, so concurrent dispatch would have
-   *   no way to match responses back to requests.
+   *
+   *   `queueStrategy: 'concurrent'` is restricted to TCP at the type level
+   *   only; there is no runtime guard. Pairing it with a non-TCP protocol by
+   *   bypassing the type system is unsupported — RTU/ASCII have no
+   *   transaction id, so concurrent dispatch would have no way to match
+   *   responses back to requests.
    */
   constructor(options: ModbusMasterOptions<P>) {
     super();
@@ -420,9 +421,9 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @throws Via `callback`: `Error('Master has been destroyed')` when the master
    *   instance has already been destroyed; `Error('Unsupported function code 0x..')`
    *   when the FC is neither a standard nor registered custom code;
-   *   `Error('Request denied by access authorizer')` / {@link UnauthorizedAccessError}
-   *   when `checkUnit` or `checkAddress` rejects the request; typed {@link ModbusError}
-   *   when either gate returns a numeric {@link ErrorCode}.
+   *   {@link UnauthorizedAccessError} when `checkUnit` or `checkAddress` rejects
+   *   the request (the message names the denied unit / address range); typed
+   *   {@link ModbusError} when either gate returns a numeric {@link ErrorCode}.
    */
   private _send(
     unit: number,
@@ -675,10 +676,10 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * @param broadcast `true` when `unit === 0` (no response awaited).
    * @param callback Callback invoked with `(err, frame)` on completion.
    * @returns `void`.
-   * @throws Via `callback`: `Error('Request denied by access authorizer')` /
-   *   {@link UnauthorizedAccessError} when the configured
-   *   {@link AccessAuthorizer.checkRuntime} callback rejects the request;
-   *   typed {@link ModbusError} when `checkRuntime` returns a numeric
+   * @throws Via `callback`: {@link UnauthorizedAccessError} with a
+   *   `'Request intercepted by access authorizer: …'` message when the
+   *   configured {@link AccessAuthorizer.checkRuntime} callback rejects the
+   *   request; typed {@link ModbusError} when `checkRuntime` returns a numeric
    *   {@link ErrorCode}; the error reported by
    *   {@link AbstractPipelineAdapter.write} when the transport rejects the
    *   outbound bytes; `Error('Request timed out')` when the heap deadline
@@ -2091,8 +2092,9 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    * });
    * ```
    */
-  public setAccessAuthorizer(authorizer: AccessAuthorizer) {
+  public setAccessAuthorizer(authorizer: AccessAuthorizer): this {
     this._accessAuthorizer = authorizer;
+    return this;
   }
 
   /**
@@ -2103,8 +2105,9 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
    *
    * @returns `this` for chaining.
    */
-  public deleteAccessAuthorizer() {
+  public deleteAccessAuthorizer(): this {
     this._accessAuthorizer = undefined;
+    return this;
   }
 
   /**

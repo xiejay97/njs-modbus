@@ -81,13 +81,13 @@ export interface ServerId {
 }
 
 /**
- * Slave-side configuration block used to answer FC 43 / MEI 14
- * (`READ_DEVICE_IDENTIFICATION`, V1.1b3 §6.21).
+ * Parsed FC 43 / MEI 14 (`READ_DEVICE_IDENTIFICATION`, V1.1b3 §6.21)
+ * response — the decode target of the master's `readDeviceIdentification`.
  *
- * Each entry in `objects` represents a TLV (id, length-prefixed string) tuple
- * on the wire; the framing layer fragments the response when the cumulative
- * payload would exceed the 253-byte PDU limit and toggles `moreFollows`
- * accordingly.
+ * Each entry in `objects` is a TLV (id, length-prefixed string) tuple decoded
+ * from the wire; when the cumulative payload would exceed the 253-byte PDU
+ * limit the slave fragments its response and sets `moreFollows`, with
+ * `nextObjectId` carrying the id to continue from.
  */
 export interface DeviceIdentification {
   /**
@@ -142,17 +142,18 @@ export type ModbusQueueStrategy =
  * Defines a non-standard / user-defined Modbus function code.
  *
  * Registration paths:
- * - `RtuApplicationLayer.addCustomFunctionCode(cfc)` — framing only.
- * - `ModbusSlave.addCustomFunctionCode(cfc)` — framing + slave-side dispatch via `handle`.
+ * - `RtuProtocolLayer.addCustomFunctionCode(cfc)` — framing only.
+ * - `ModbusSlave.addCustomFunctionCode(cfc, response)` — framing + slave-side dispatch.
  * - `ModbusMaster.addCustomFunctionCode(cfc)` + `ModbusMaster.sendCustomFC(...)` — framing + request issuance.
  *
- * The two `predict*` callbacks declare how to derive the total RTU frame length
- * (PDU + 2-byte CRC) from leading bytes; they are required so the framing FSM
- * can advance without the deleted sliding-window CRC fallback.
- *
- * Return `0` to signal "need more bytes before I can decide".
- * Return `-1` to signal "cannot determine the length".
- * Return a positive integer (>= 4, <= 256) for the total frame length.
+ * RTU registrations must additionally provide a `determineFrameLength`
+ * callback — required through the conditional registration signatures, not
+ * part of this base interface — declaring how to derive the total RTU frame
+ * length (unit byte + FC + payload + 2-byte CRC) from leading bytes, so the
+ * framing FSM can advance without a sliding-window CRC fallback. Its return
+ * protocol: `0` = need more bytes before the length can be decided,
+ * `-1` = the length cannot be determined, a positive integer (>= 4, <= 256)
+ * = the total frame length.
  */
 export interface CustomFunctionCode {
   /**
