@@ -1945,7 +1945,7 @@ describe('ModbusMaster', () => {
   });
 
   describe('broadcast race conditions', () => {
-    it('should handle broadcast write callback arriving after timeout', async () => {
+    it('should settle a broadcast only at write completion (no timeout fallback)', async () => {
       const { master, adapter } = createMaster(10);
       let writeCb: ((err: Error | null) => void) | undefined;
       adapter.write = function (data: Buffer, cb?: (err: Error | null) => void): void {
@@ -1953,14 +1953,22 @@ describe('ModbusMaster', () => {
         writeCb = cb;
       };
 
-      const promise = master.writeSingleRegister(0, 10, 0xabcd);
+      let settled = false;
+      const promise = master.writeSingleRegister(0, 10, 0xabcd).then(() => {
+        settled = true;
+      });
       await flushPromises();
       expect(adapter.written).toHaveLength(1);
 
-      await expect(promise).rejects.toThrow('Request timed out');
+      // Well past the response timeout: nothing settles — timeouts are
+      // response deadlines and never apply to broadcasts.
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      await flushPromises();
+      expect(settled).toBe(false);
 
       writeCb?.(null);
-      await flushPromises();
+      await promise;
+      expect(settled).toBe(true);
     });
 
     it('should handle non-broadcast response arriving before write callback', async () => {

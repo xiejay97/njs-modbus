@@ -84,9 +84,9 @@ export interface ModbusMasterOptions<P extends 'TCP' | 'RTU' | 'ASCII'> {
    * request/response cycle. `Infinity` (default) enforces no cap: a response
    * that starts arriving but never completes will hang indefinitely. Set a
    * finite value to guarantee termination; a single request can still opt back
-   * out by passing `Infinity` at the call site. For broadcasts it also caps
-   * the write-completion deadline (falling back to {@link responseTimeout}
-   * when `Infinity`).
+   * out by passing `Infinity` at the call site. Timeouts are response
+   * deadlines: they never apply to broadcasts (no response is awaited —
+   * a broadcast settles at write completion).
    */
   totalTimeout?: number;
 }
@@ -785,16 +785,10 @@ export class ModbusMaster<P extends 'TCP' | 'RTU' | 'ASCII'> extends CompactEven
     }
 
     if (broadcast) {
-      // Broadcast: no response expected. responseTimeout (first-byte) does not
-      // apply; the write-completion deadline falls back to responseTimeout when
-      // totalTimeout is uncapped, preserving the historical default safety net.
-      // `Infinity` is the documented "no cap" value and must never reach
-      // TimerHeap (a native setTimeout clamps it to ~1 ms, which would fire
-      // instantly instead of never).
-      const broadcastDeadline = totalTimeout !== Infinity ? totalTimeout : responseTimeout;
-      if (broadcastDeadline !== Infinity) {
-        this._timerHeap.add(exchangeId * 2 + 1, broadcastDeadline);
-      }
+      // Broadcast: no response expected. Timeouts are response deadlines and
+      // do not apply to transmission: the write callback is the only
+      // settlement path, and write completion is a hard contract of the
+      // pipeline adapter (a wedged adapter is flushed by disconnect/destroy).
       this._pipelineAdapter.write(this._protocolLayer.encode(unit, fc, data, tid), (writeErr) => {
         if (pending.settled) {
           return;
