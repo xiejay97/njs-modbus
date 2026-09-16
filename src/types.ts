@@ -53,7 +53,10 @@ export interface ApplicationDataUnit {
  *
  * Extends {@link ApplicationDataUnit} with the raw, on-wire buffer that
  * produced it. The raw buffer is useful for audit logging, replay, and
- * diagnostic events.
+ * diagnostic events. For ASCII frames reassembled across multiple transport
+ * chunks, `buffer` instead holds the decoded frame bytes (unit + FC + PDU +
+ * LRC) — the on-wire hex characters are folded into bytes during reception and
+ * are not retained.
  */
 export type ModbusFrame = ApplicationDataUnit & { buffer: Buffer };
 

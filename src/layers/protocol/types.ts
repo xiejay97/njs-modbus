@@ -53,6 +53,8 @@ export interface FrameErrorEvent {
    * The raw, unprocessable bytes that caused the failure.
    * This is a snapshot of the bad frame data and is safe to inspect or log.
    * Its length is capped at the protocol-specific maximum frame length.
+   * For ASCII frames rejected mid-reception, this holds the decoded bytes
+   * collected so far rather than the on-wire hex characters.
    */
   raw: Buffer;
 

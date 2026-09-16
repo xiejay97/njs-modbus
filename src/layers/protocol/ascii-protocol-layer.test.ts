@@ -13,8 +13,11 @@
  *     https://mariadb.com/bsl11/
  */
 
+import type { ModbusFrame } from '#src/types';
+
 import { AsciiProtocolLayer } from './ascii-protocol-layer';
 
+import { lrc } from '#src/utils/lrc';
 import { asciiExceptionFrame, asciiFrame, pduReadCoils } from '#test/helpers/fixtures';
 import { collectFrames } from '#test/helpers/utils';
 
@@ -301,5 +304,81 @@ describe('AsciiProtocolLayer', () => {
     expect(frames).toHaveLength(0);
     expect(errors).toHaveLength(1);
     expect(errors[0].message).toContain('invalid hex character');
+  });
+
+  it('should emit a slow-path error for an odd hex character count', () => {
+    const layer = new AsciiProtocolLayer('MASTER');
+    const { frames, errors } = collectFrames(layer);
+
+    // 7 hex characters — the trailing '0' leaves a dangling high nibble at CR.
+    const frame = Buffer.from(':0103040\r\n');
+    for (let i = 0; i < frame.length; i++) {
+      layer.decode(frame.subarray(i, i + 1));
+    }
+
+    expect(frames).toHaveLength(0);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain('odd character count');
+  });
+
+  it('should emit a slow-path error when the hex body is too short', () => {
+    const layer = new AsciiProtocolLayer('MASTER');
+    const { frames, errors } = collectFrames(layer);
+
+    // Only 2 hex characters, below the 6-character minimum for unit + FC + LRC.
+    layer.decode(Buffer.from(':01\r'));
+    layer.decode(Buffer.from('\n'));
+
+    expect(frames).toHaveLength(0);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain('too short');
+  });
+
+  it('should discard a partial frame when a colon restarts reception', () => {
+    const layer = new AsciiProtocolLayer('MASTER');
+    const { frames } = collectFrames(layer);
+
+    const pdu = pduReadRegistersResponse([0x1234]);
+    const frame = asciiFrame(1, 0x03, pdu);
+    // ':01F' leaves a dangling high nibble pending before the fresh frame starts.
+    const stream = Buffer.concat([Buffer.from(':01F'), frame]);
+    for (let i = 0; i < stream.length; i++) {
+      layer.decode(stream.subarray(i, i + 1));
+    }
+
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ unit: 1, fc: 0x03, data: pdu });
+  });
+
+  it('should emit decoded frame bytes as the buffer on the slow path', () => {
+    const layer = new AsciiProtocolLayer('MASTER');
+    const { frames } = collectFrames(layer);
+
+    const pdu = pduReadRegistersResponse([0x1234]);
+    const frame = asciiFrame(1, 0x03, pdu);
+    for (let i = 0; i < frame.length; i++) {
+      layer.decode(frame.subarray(i, i + 1));
+    }
+
+    // unit + FC + PDU + LRC — decoded bytes, not the on-wire hex characters.
+    const body = Buffer.concat([Buffer.from([1, 0x03]), pdu]);
+    const expected = Buffer.concat([body, Buffer.from([lrc(body, 0, body.length)])]);
+    expect(frames).toHaveLength(1);
+    expect(frames[0].buffer).toEqual(expected);
+  });
+
+  it('should deliver reassembled frames through the lazy producer', () => {
+    const layer = new AsciiProtocolLayer('MASTER');
+    const frames: ModbusFrame[] = [];
+    layer.onFrameLazy = (lazy) => frames.push(lazy());
+
+    const pdu = pduReadRegistersResponse([0x1234]);
+    const frame = asciiFrame(1, 0x03, pdu);
+    for (let i = 0; i < frame.length; i++) {
+      layer.decode(frame.subarray(i, i + 1));
+    }
+
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ unit: 1, fc: 0x03, data: pdu });
   });
 });

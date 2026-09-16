@@ -18,6 +18,14 @@ import { AbstractProtocolLayer } from './abstract-protocol-layer';
 /** Maximum number of hex characters allowed between the leading ':' and trailing CRLF in an ASCII frame. */
 const MAX_FRAME_LENGTH = 512;
 
+/**
+ * Maximum number of decoded bytes staged during fragmented reception
+ * (unit + FC + PDU + LRC). Exactly half of {@link MAX_FRAME_LENGTH}: every two
+ * on-wire hex characters are folded into one byte the moment they arrive, so
+ * the staging buffer is 256 bytes instead of 512.
+ */
+const MAX_BODY_LENGTH = MAX_FRAME_LENGTH >> 1;
+
 /** Wire byte codes for the ASCII frame delimiter characters. */
 const CHAR_CODE = {
   COLON: ':'.charCodeAt(0),
@@ -87,6 +95,13 @@ export interface AsciiProtocolLayerOptions {
  * with `\r\n`. An LRC sum-of-bytes checksum immediately precedes the CRLF. The
  * layer parses frames from arbitrary byte chunks using a small FSM and supports
  * strict uppercase hex or lenient lowercase hex.
+ *
+ * Fragmented reception stages decoded bytes (not hex characters) in a 256-byte
+ * buffer with a running LRC accumulator: each arriving hex character folds into
+ * a pending nibble or completes a byte, so end-of-frame validation is O(1) and
+ * the staged frame is emitted with a single copy. Because the on-wire hex
+ * characters are never retained, the `buffer` / `raw` fields of events emitted
+ * from this path report the decoded frame bytes (unit + FC + PDU + LRC).
  */
 export class AsciiProtocolLayer extends AbstractProtocolLayer {
   /** Always `'ASCII'` for this implementation. */
@@ -95,8 +110,15 @@ export class AsciiProtocolLayer extends AbstractProtocolLayer {
   public readonly ROLE: 'MASTER' | 'SLAVE';
 
   private _status: 'idle' | 'reception' | 'waiting end' = 'idle';
-  private _frame: Uint8Array = new Uint8Array(MAX_FRAME_LENGTH);
-  private _frameLen: number = 0;
+  // Decoded-byte staging for fragmented reception. Hex characters are folded
+  // into bytes on arrival, so 256 bytes cover the full 512-character hex body.
+  private _body: Uint8Array = new Uint8Array(MAX_BODY_LENGTH);
+  private _bodyLen: number = 0;
+  // High nibble (0..15) awaiting its low half, or -1 when byte-aligned.
+  private _pendingNibble: number = -1;
+  // Running LRC accumulator over every staged byte, including the LRC byte
+  // itself — a complete frame is valid iff `_lrcSum & 0xff === 0`.
+  private _lrcSum: number = 0;
 
   private _lenientHex: boolean;
   private _hexTable: Uint8Array;
@@ -123,7 +145,9 @@ export class AsciiProtocolLayer extends AbstractProtocolLayer {
    */
   override flush(): void {
     this._status = 'idle';
-    this._frameLen = 0;
+    this._bodyLen = 0;
+    this._pendingNibble = -1;
+    this._lrcSum = 0;
   }
 
   /**
@@ -214,7 +238,9 @@ export class AsciiProtocolLayer extends AbstractProtocolLayer {
       if (this._status === 'idle') {
         if (data[index] === CHAR_CODE.COLON) {
           this._status = 'reception';
-          this._frameLen = 0;
+          this._bodyLen = 0;
+          this._pendingNibble = -1;
+          this._lrcSum = 0;
         }
         index++;
         continue;
@@ -224,7 +250,9 @@ export class AsciiProtocolLayer extends AbstractProtocolLayer {
         while (index < dataLen) {
           const value = data[index];
           if (value === CHAR_CODE.COLON) {
-            this._frameLen = 0;
+            this._bodyLen = 0;
+            this._pendingNibble = -1;
+            this._lrcSum = 0;
             index++;
             continue;
           }
@@ -233,47 +261,60 @@ export class AsciiProtocolLayer extends AbstractProtocolLayer {
             index++;
             break;
           }
-          if (this._frameLen >= MAX_FRAME_LENGTH) {
-            const exceededLen = this._frameLen;
+          if (this._bodyLen >= MAX_BODY_LENGTH) {
+            const exceededLen = this._bodyLen;
             this._status = 'idle';
-            this._frameLen = 0;
+            this._bodyLen = 0;
+            this._pendingNibble = -1;
             if (this.onFrameError) {
               this.onFrameError({
                 type: 'frame_too_long',
                 message: `ASCII frame hex body exceeds maximum length of ${MAX_FRAME_LENGTH} characters`,
-                raw: Buffer.copyBytesFrom(this._frame, 0, exceededLen),
+                raw: Buffer.copyBytesFrom(this._body, 0, exceededLen),
               });
             } else if (this.onFrameErrorLazy) {
               this.onFrameErrorLazy(() => ({
                 type: 'frame_too_long',
                 message: `ASCII frame hex body exceeds maximum length of ${MAX_FRAME_LENGTH} characters`,
-                raw: Buffer.copyBytesFrom(this._frame, 0, exceededLen),
+                raw: Buffer.copyBytesFrom(this._body, 0, exceededLen),
               }));
             }
             index++;
             break;
           }
-          if (this._hexTable[value] > 15) {
-            const invalidPos = this._frameLen;
+          const nibble = this._hexTable[value];
+          if (nibble > 15) {
+            const bodyLen = this._bodyLen;
+            const invalidPos = (bodyLen << 1) + (this._pendingNibble >= 0 ? 1 : 0);
             this._status = 'idle';
-            this._frameLen = 0;
+            this._bodyLen = 0;
+            this._pendingNibble = -1;
             if (this.onFrameError) {
               this.onFrameError({
                 type: 'hex_character_invalid',
                 message: `ASCII frame contains invalid hex character 0x${value.toString(16).padStart(2, '0').toUpperCase()} at hex body position ${invalidPos}`,
-                raw: Buffer.copyBytesFrom(this._frame, 0, invalidPos),
+                raw: Buffer.copyBytesFrom(this._body, 0, bodyLen),
               });
             } else if (this.onFrameErrorLazy) {
               this.onFrameErrorLazy(() => ({
                 type: 'hex_character_invalid',
                 message: `ASCII frame contains invalid hex character 0x${value.toString(16).padStart(2, '0').toUpperCase()} at hex body position ${invalidPos}`,
-                raw: Buffer.copyBytesFrom(this._frame, 0, invalidPos),
+                raw: Buffer.copyBytesFrom(this._body, 0, bodyLen),
               }));
             }
             index++;
             break;
           }
-          this._frame[this._frameLen++] = value;
+          // Fold each hex pair into one staged byte and accumulate the LRC as
+          // the characters arrive — no decode pass is needed at end-of-frame.
+          if (this._pendingNibble >= 0) {
+            const byte = (this._pendingNibble << 4) | nibble;
+            this._body[this._bodyLen++] = byte;
+            this._lrcSum += byte;
+            this._pendingNibble = -1;
+          } else {
+            this._pendingNibble = nibble;
+          }
           index++;
         }
         continue;
@@ -283,102 +324,83 @@ export class AsciiProtocolLayer extends AbstractProtocolLayer {
       const value = data[index];
       if (value === CHAR_CODE.COLON) {
         this._status = 'reception';
-        this._frameLen = 0;
+        this._bodyLen = 0;
+        this._pendingNibble = -1;
+        this._lrcSum = 0;
       } else {
         this._status = 'idle';
         if (value === CHAR_CODE.LF) {
-          const hexLen = this._frameLen;
+          const bodyLen = this._bodyLen;
+          const hexLen = (bodyLen << 1) + (this._pendingNibble >= 0 ? 1 : 0);
           if (hexLen < 6) {
             if (this.onFrameError) {
               this.onFrameError({
                 type: 'frame_length_insufficient',
                 message: `ASCII frame hex body too short: received ${hexLen} characters, minimum is 6`,
-                raw: Buffer.copyBytesFrom(this._frame, 0, hexLen),
+                raw: Buffer.copyBytesFrom(this._body, 0, bodyLen),
               });
             } else if (this.onFrameErrorLazy) {
               this.onFrameErrorLazy(() => ({
                 type: 'frame_length_insufficient',
                 message: `ASCII frame hex body too short: received ${hexLen} characters, minimum is 6`,
-                raw: Buffer.copyBytesFrom(this._frame, 0, hexLen),
+                raw: Buffer.copyBytesFrom(this._body, 0, bodyLen),
               }));
             }
-          } else if (hexLen % 2 !== 0) {
+          } else if (this._pendingNibble >= 0) {
             if (this.onFrameError) {
               this.onFrameError({
                 type: 'frame_length_invalid',
                 message: `ASCII frame hex body has odd character count: ${hexLen}`,
-                raw: Buffer.copyBytesFrom(this._frame, 0, hexLen),
+                raw: Buffer.copyBytesFrom(this._body, 0, bodyLen),
               });
             } else if (this.onFrameErrorLazy) {
               this.onFrameErrorLazy(() => ({
                 type: 'frame_length_invalid',
                 message: `ASCII frame hex body has odd character count: ${hexLen}`,
-                raw: Buffer.copyBytesFrom(this._frame, 0, hexLen),
+                raw: Buffer.copyBytesFrom(this._body, 0, bodyLen),
+              }));
+            }
+          } else if ((this._lrcSum & 0xff) !== 0) {
+            const lrcIn = this._body[bodyLen - 1];
+            const lrcComputed = -(this._lrcSum - lrcIn) & 0xff;
+            const fc = this._body[1];
+            if (this.onFrameError) {
+              this.onFrameError({
+                type: 'lrc_check_failed',
+                message: `ASCII frame LRC check failed: expected 0x${lrcComputed.toString(16).padStart(2, '0').toUpperCase()}, received 0x${lrcIn.toString(16).padStart(2, '0').toUpperCase()}`,
+                raw: Buffer.copyBytesFrom(this._body, 0, bodyLen),
+                fc,
+              });
+            } else if (this.onFrameErrorLazy) {
+              this.onFrameErrorLazy(() => ({
+                type: 'lrc_check_failed',
+                message: `ASCII frame LRC check failed: expected 0x${lrcComputed.toString(16).padStart(2, '0').toUpperCase()}, received 0x${lrcIn.toString(16).padStart(2, '0').toUpperCase()}`,
+                raw: Buffer.copyBytesFrom(this._body, 0, bodyLen),
+                fc,
               }));
             }
           } else {
-            const byteLen = hexLen >> 1;
-            const unit = (this._hexTable[this._frame[0]] << 4) | this._hexTable[this._frame[1]];
-            const fc = (this._hexTable[this._frame[2]] << 4) | this._hexTable[this._frame[3]];
-            const lrcIn = (this._hexTable[this._frame[hexLen - 2]] << 4) | this._hexTable[this._frame[hexLen - 1]];
-
-            const payloadLen = byteLen - 3;
-            let hexOff = 4;
-            let sum = unit + fc;
-            for (let j = 0; j < payloadLen; j++) {
-              const hi = this._hexTable[this._frame[hexOff]];
-              const lo = this._hexTable[this._frame[hexOff + 1]];
-              sum += (hi << 4) | lo;
-              hexOff += 2;
-            }
-
-            const lrcComputed = (~sum + 1) & 0xff;
-            if (lrcIn !== lrcComputed) {
-              if (this.onFrameError) {
-                this.onFrameError({
-                  type: 'lrc_check_failed',
-                  message: `ASCII frame LRC check failed: expected 0x${lrcComputed.toString(16).padStart(2, '0').toUpperCase()}, received 0x${lrcIn.toString(16).padStart(2, '0').toUpperCase()}`,
-                  raw: Buffer.copyBytesFrom(this._frame, 0, hexLen),
-                  fc,
-                });
-              } else if (this.onFrameErrorLazy) {
-                this.onFrameErrorLazy(() => ({
-                  type: 'lrc_check_failed',
-                  message: `ASCII frame LRC check failed: expected 0x${lrcComputed.toString(16).padStart(2, '0').toUpperCase()}, received 0x${lrcIn.toString(16).padStart(2, '0').toUpperCase()}`,
-                  raw: Buffer.copyBytesFrom(this._frame, 0, hexLen),
-                  fc,
-                }));
-              }
-            } else {
-              if (this.onFrame) {
-                const payload = Buffer.allocUnsafe(payloadLen);
-                let off = 4;
-                for (let j = 0; j < payloadLen; j++) {
-                  payload[j] = (this._hexTable[this._frame[off]] << 4) | this._hexTable[this._frame[off + 1]];
-                  off += 2;
-                }
-                this.onFrame({
-                  unit,
-                  fc,
-                  data: payload,
-                  buffer: Buffer.copyBytesFrom(this._frame, 0, hexLen),
-                });
-              } else if (this.onFrameLazy) {
-                this.onFrameLazy(() => {
-                  const payload = Buffer.allocUnsafe(payloadLen);
-                  let off = 4;
-                  for (let j = 0; j < payloadLen; j++) {
-                    payload[j] = (this._hexTable[this._frame[off]] << 4) | this._hexTable[this._frame[off + 1]];
-                    off += 2;
-                  }
-                  return {
-                    unit,
-                    fc,
-                    data: payload,
-                    buffer: Buffer.copyBytesFrom(this._frame, 0, hexLen),
-                  };
-                });
-              }
+            // LRC already verified by the running accumulator — emit one
+            // contiguous decoded buffer with a zero-copy payload subarray,
+            // mirroring the RTU layer's completion path.
+            if (this.onFrame) {
+              const raw = Buffer.copyBytesFrom(this._body, 0, bodyLen);
+              this.onFrame({
+                unit: raw[0],
+                fc: raw[1],
+                data: raw.subarray(2, bodyLen - 1),
+                buffer: raw,
+              });
+            } else if (this.onFrameLazy) {
+              this.onFrameLazy(() => {
+                const raw = Buffer.copyBytesFrom(this._body, 0, bodyLen);
+                return {
+                  unit: raw[0],
+                  fc: raw[1],
+                  data: raw.subarray(2, bodyLen - 1),
+                  buffer: raw,
+                };
+              });
             }
           }
         }
