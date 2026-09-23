@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.0.1](https://github.com/xiejay97/njs-modbus/compare/v5.0.0...v5.0.1) (2026-09-23)
+
+### Bug Fixes
+
+* **master:** settle broadcasts only at write completion ([7616af8](https://github.com/xiejay97/njs-modbus/commit/7616af8d00d0a192b89701d38b08d27219c5f742))
+* return this from chainable master/slave methods and align docs with code ([bd0039a](https://github.com/xiejay97/njs-modbus/commit/bd0039af8a3f416bd6717240f5f3a7187e90a558))
+
 ## [5.0.0](https://github.com/xiejay97/njs-modbus/compare/v4.1.0...v5.0.0) (2026-08-04)
 
 ### ⚠ BREAKING CHANGES
