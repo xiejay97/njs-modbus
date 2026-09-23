@@ -7,13 +7,13 @@ export default defineConfig({
   format: ['esm', 'cjs'],
   tsconfig: './tsconfig.build.json',
   dts: {
-    tsgo: true,
+    generator: 'tsgo',
   },
   exports: false,
   platform: 'node',
   target: 'node18',
   deps: {
-    skipNodeModulesBundle: true,
+    neverBundle: true,
   },
   treeshake: {
     moduleSideEffects: false,
